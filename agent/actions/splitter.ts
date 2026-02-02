@@ -1,5 +1,5 @@
 import { SwapIntent } from "../core/types"
-import { ChunkPlan } from "../reasoning/decisionEngine"
+import { ChunkPlan } from "../reasoning/chunkOptimizer"
 import { SandwichSimulation } from "../perception/simulator"
 import { publicClient } from "../core/config"
 import { parseAbi, getAddress } from "viem"
@@ -208,15 +208,13 @@ export async function buildSplitPlan(
     totalMinOut += minOut
 
     // Assign route: distribute across chains if cross-chain enabled
+    const assignedChain = plan.chains?.[i] || "ethereum"
     let route: ChunkExecution["route"]
-    if (plan.crossChain && i > 0) {
-      // First chunk stays on source chain, rest distribute across chains
-      const targetIdx = (i - 1) % (CROSS_CHAIN_TARGETS.length - 1) + 1
-      const target = CROSS_CHAIN_TARGETS[targetIdx]
+    if (assignedChain !== "ethereum") {
       route = {
         type: "CROSS_CHAIN",
-        chain: target.chain,
-        dex: "lifi", // LI.FI handles cross-chain routing
+        chain: assignedChain,
+        dex: "lifi",
         path: [tokenIn, tokenOut],
       }
     } else {
@@ -228,9 +226,8 @@ export async function buildSplitPlan(
       }
     }
 
-    // Block delay: stagger execution across blocks
-    // First chunk: immediate. Rest: 1-3 block gaps, randomized
-    const blockDelay = i === 0 ? 0 : Math.floor(Math.random() * 3) + 1
+    // Block delay from LLM plan
+    const blockDelay = plan.blockDelays?.[i] ?? (i === 0 ? 0 : 1)
 
     // Build unsigned tx calldata for same-chain chunks
     let tx: ChunkExecution["tx"] = null

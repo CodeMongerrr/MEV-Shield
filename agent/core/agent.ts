@@ -15,10 +15,12 @@ export class MEVShieldAgent {
       ? Number(sim.cleanOutputRaw) / 10 ** sim.outDecimals
       : 0
 
-    const strategy = decide(sim, policy, tradeSizeUsd)
+    const strategy = await decide(sim, policy, tradeSizeUsd)
+
+    console.log("🧠 Strategy:", JSON.stringify(strategy, null, 2))
+
     const execution = await execute(strategy, intent, sim)
 
-    // Serialize bigints for JSON response
     const serializeChunks = execution.splitResult?.chunks.map((c) => ({
       index: c.index,
       sizePercent: c.sizePercent,
@@ -31,6 +33,20 @@ export class MEVShieldAgent {
       route: c.route,
       blockDelay: c.blockDelay,
     }))
+
+    const serializePrivateTx = execution.privateTxPlan
+      ? {
+          relay: execution.privateTxPlan.relay,
+          economics: execution.privateTxPlan.economics,
+          tx: {
+            to: execution.privateTxPlan.tx.to,
+            gasLimit: execution.privateTxPlan.tx.gasLimit.toString(),
+            maxFeePerGas: execution.privateTxPlan.tx.maxFeePerGas.toString(),
+            maxPriorityFeePerGas: execution.privateTxPlan.tx.maxPriorityFeePerGas.toString(),
+          },
+          unsignedTxHash: execution.privateTxPlan.unsignedTxHash,
+        }
+      : null
 
     return {
       input: {
@@ -60,6 +76,7 @@ export class MEVShieldAgent {
               executionBlocks: execution.splitResult!.executionBlocks,
             }
           : null,
+        privateTx: serializePrivateTx,
       },
       policy,
     }

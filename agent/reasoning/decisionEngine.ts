@@ -1,12 +1,8 @@
 import { UserPolicy } from "../core/types"
 import { SandwichSimulation } from "../perception/simulator"
+import { optimizeChunks, ChunkPlan } from "./chunkOptimizer"
 
-export interface ChunkPlan {
-  count: number
-  sizes: number[] // percentages of total, sum = 100
-  crossChain: boolean
-  reasoning: string
-}
+export type { ChunkPlan } from "./chunkOptimizer"
 
 export type Strategy =
   | { type: "DIRECT"; reasoning: string }
@@ -15,103 +11,54 @@ export type Strategy =
   | { type: "PRIVATE"; reasoning: string }
   | { type: "FULL_SHIELD"; plan: ChunkPlan; reasoning: string }
 
-// Generate random unequal chunk sizes that sum to 100
-function randomChunkSizes(count: number): number[] {
-  // Generate random breakpoints
-  const points: number[] = []
-  for (let i = 0; i < count - 1; i++) {
-    points.push(Math.random() * 100)
-  }
-  points.push(0)
-  points.push(100)
-  points.sort((a, b) => a - b)
+export async function decide(
+  sim: SandwichSimulation,
+  policy: UserPolicy,
+  tradeSizeUsd: number
+): Promise<Strategy> {
+  console.log(`\n🧠 Deciding: risk=${sim.risk}, viable=${sim.attackViable}, trade=$${tradeSizeUsd.toFixed(2)}, gasCost=$${sim.gasData.sandwichGasCostUsd.toFixed(2)}`)
 
-  const sizes: number[] = []
-  for (let i = 1; i < points.length; i++) {
-    const size = Math.round(points[i] - points[i - 1])
-    if (size > 0) sizes.push(size)
-  }
-
-  // If rounding killed a chunk, redistribute
-  while (sizes.length < count) sizes.push(1)
-  while (sizes.length > count) sizes.pop()
-
-  // Fix sum to 100
-  const sum = sizes.reduce((a, b) => a + b, 0)
-  sizes[0] += 100 - sum
-
-  return sizes
-}
-
-export function decide(sim: SandwichSimulation, policy: UserPolicy, tradeSizeUsd: number): Strategy {
-  const { attackViable, safeChunkThresholdUsd, gasData } = sim
-
-  console.log(`🧠 Deciding: risk=${sim.risk}, viable=${attackViable}, tradeSize=$${tradeSizeUsd.toFixed(2)}, gasCost=$${gasData.sandwichGasCostUsd.toFixed(2)}`)
-
-  // If attack isn't even profitable after gas, no protection needed
-  if (!attackViable) {
+  if (!sim.attackViable) {
     return {
       type: "DIRECT",
-      reasoning: `Attack not viable. Attacker profit ($${sim.attackerProfitUsd.toFixed(2)}) < gas cost ($${gasData.sandwichGasCostUsd.toFixed(2)}). Safe to execute directly.`,
+      reasoning: `Attack not viable. Attacker profit ($${sim.attackerProfitUsd.toFixed(2)}) < gas cost ($${sim.gasData.sandwichGasCostUsd.toFixed(2)}).`,
     }
   }
 
-  // Attack is viable. Calculate optimal chunks.
-  // Each chunk must be below safeChunkThresholdUsd to be unprofitable to sandwich
   if (sim.risk === "MEDIUM" && tradeSizeUsd <= policy.privateThresholdUsd) {
     return {
       type: "MEV_ROUTE",
-      reasoning: `Medium risk, trade ($${tradeSizeUsd.toFixed(0)}) below private threshold ($${policy.privateThresholdUsd}). Route through safer pools.`,
+      reasoning: `Medium risk, trade ($${tradeSizeUsd.toFixed(0)}) below threshold ($${policy.privateThresholdUsd}). Safer pool routing.`,
     }
   }
 
-  // Calculate how many chunks we need so each chunk < safeChunkThresholdUsd
-  const neededChunks = safeChunkThresholdUsd > 0
-    ? Math.ceil(tradeSizeUsd / safeChunkThresholdUsd)
-    : 2
+  // Run optimizer for anything that needs splitting
+  const plan = await optimizeChunks(sim, policy, tradeSizeUsd)
 
-  // Clamp between 2-7 chunks (more than 7 = too much gas overhead for user)
-  const chunkCount = Math.max(2, Math.min(7, neededChunks))
-
-  if (sim.risk === "MEDIUM") {
-    const sizes = randomChunkSizes(chunkCount)
+  // Check if splitting actually helps vs just paying for private relay
+  // If total split cost > original MEV loss, splitting isn't worth it
+  if (plan.totalCost >= sim.estimatedLossUsd) {
     return {
-      type: "SPLIT",
-      plan: {
-        count: chunkCount,
-        sizes,
-        crossChain: false,
-        reasoning: `Need ${chunkCount} chunks to get each below $${safeChunkThresholdUsd.toFixed(0)} safe threshold.`,
-      },
-      reasoning: `Medium risk, above threshold. Splitting into ${chunkCount} unequal chunks.`,
+      type: "PRIVATE",
+      reasoning: `Split cost ($${plan.totalCost.toFixed(2)}) >= MEV loss ($${sim.estimatedLossUsd.toFixed(2)}). Private relay is cheaper.`,
     }
   }
 
-  if (sim.risk === "HIGH") {
-    const sizes = randomChunkSizes(chunkCount)
-    return {
-      type: "SPLIT",
-      plan: {
-        count: chunkCount,
-        sizes,
-        crossChain: policy.riskProfile !== "aggressive",
-        reasoning: `High risk. ${chunkCount} chunks, cross-chain to break attacker observation.`,
-      },
-      reasoning: `High risk. Splitting across ${chunkCount} chunks${policy.riskProfile !== "aggressive" ? " + cross-chain routing" : ""}.`,
+  if (sim.risk === "CRITICAL") {
+    // Check if any chunks are still unsafe
+    const unsafeChunks = plan.economics.filter((e) => !e.safe)
+    if (unsafeChunks.length > 0) {
+      return {
+        type: "FULL_SHIELD",
+        plan,
+        reasoning: `Critical risk. ${plan.count} optimized chunks but ${unsafeChunks.length} still unsafe — adding private relay.`,
+      }
     }
   }
 
-  // CRITICAL
-  const criticalChunks = Math.max(3, Math.min(7, neededChunks + 1))
-  const sizes = randomChunkSizes(criticalChunks)
   return {
-    type: "FULL_SHIELD",
-    plan: {
-      count: criticalChunks,
-      sizes,
-      crossChain: true,
-      reasoning: `Critical risk. ${criticalChunks} chunks + cross-chain + private relay.`,
-    },
-    reasoning: `Critical risk. Full protection: ${criticalChunks} random chunks, cross-chain split, private relay.`,
+    type: "SPLIT",
+    plan,
+    reasoning: `${sim.risk} risk. Optimizer chose ${plan.count} chunks across ${[...new Set(plan.chains)].join("+")}. Cost: $${plan.totalCost.toFixed(2)} vs $${sim.estimatedLossUsd.toFixed(2)} unprotected.`,
   }
 }
