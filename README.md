@@ -2,7 +2,7 @@ Initial commit: HackMoney MEV Shield
 
 Project: MEV Shield - Protection Against Maximal Extractable Value
 Hackathon: HackMoney 2026
-Team: [Your Team Name]
+Team: MEV-Shield
 
 ## Overview
 MEV Shield is a decentralized protection mechanism designed to safeguard users from MEV attacks including frontrunning, sandwich attacks, and other forms of transaction manipulation.
@@ -12,12 +12,6 @@ MEV Shield is a decentralized protection mechanism designed to safeguard users f
 - Minimize transaction costs while maximizing security
 - Build an open-source, auditable solution
 - Create a seamless user experience
-
-## Tech Stack
-- [Add your blockchain platform]
-- [Add your smart contract framework]
-- [Add your frontend framework]
-- [Add other key technologies]
 
 ## Repository Structure
 Initial project scaffold with basic configuration and documentation.
