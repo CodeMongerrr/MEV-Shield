@@ -1,5 +1,5 @@
 import { SwapIntent } from "./types"
-import { simulate, SandwichSimulation } from "../perception/simulator"
+import { simulate } from "../perception/simulator"
 import { fetchUserPolicy } from "../perception/ens"
 import { decide } from "../reasoning/decisionEngine"
 import { execute } from "../actions/executor"
@@ -11,16 +11,26 @@ export class MEVShieldAgent {
     const policy = await fetchUserPolicy(intent.user)
     const sim = await simulate(intent)
 
-    // Trade size from clean output
     const tradeSizeUsd = sim.cleanOutputRaw > 0n
       ? Number(sim.cleanOutputRaw) / 10 ** sim.outDecimals
       : 0
 
     const strategy = decide(sim, policy, tradeSizeUsd)
+    const execution = await execute(strategy, intent, sim)
 
-    console.log("🧠 Strategy:", JSON.stringify(strategy, null, 2))
-
-    await execute(strategy, intent)
+    // Serialize bigints for JSON response
+    const serializeChunks = execution.splitResult?.chunks.map((c) => ({
+      index: c.index,
+      sizePercent: c.sizePercent,
+      amountIn: c.amountIn.toString(),
+      expectedOut: c.expectedOut.toString(),
+      minAmountOut: c.minAmountOut.toString(),
+      priceImpactPercent: c.priceImpactPercent,
+      mevExposureUsd: c.mevExposureUsd,
+      safeTx: c.safeTx,
+      route: c.route,
+      blockDelay: c.blockDelay,
+    }))
 
     return {
       input: {
@@ -39,7 +49,18 @@ export class MEVShieldAgent {
         safeChunkThresholdUsd: Number(sim.safeChunkThresholdUsd.toFixed(2)),
       },
       tradeSizeUsd: Number(tradeSizeUsd.toFixed(2)),
-      strategy,
+      execution: {
+        strategyType: execution.strategyType,
+        reasoning: execution.reasoning,
+        split: serializeChunks
+          ? {
+              chunks: serializeChunks,
+              totalMevExposureUsd: execution.splitResult!.totalMevExposureUsd,
+              allChunksSafe: execution.splitResult!.allChunksSafe,
+              executionBlocks: execution.splitResult!.executionBlocks,
+            }
+          : null,
+      },
       policy,
     }
   }
