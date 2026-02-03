@@ -3,6 +3,7 @@ import { ChunkPlan } from "../reasoning/chunkOptimizer"
 import { SandwichSimulation } from "../perception/simulator"
 import { publicClient } from "../core/config"
 import { parseAbi, getAddress } from "viem"
+import { buildCrossChainTx, CrossChainTx } from "./lifiRouter"
 
 const UNISWAP_V2_ROUTER = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D" as const
 
@@ -19,7 +20,7 @@ export interface ChunkExecution {
   minAmountOut: bigint
   priceImpactPercent: number
   mevExposureUsd: number
-  safeTx: boolean // attacker profit < gas cost for this chunk
+  safeTx: boolean
   route: {
     type: "SAME_CHAIN" | "CROSS_CHAIN"
     chain: string
@@ -31,7 +32,8 @@ export interface ChunkExecution {
     data: `0x${string}`
     value: bigint
   } | null
-  blockDelay: number // how many blocks to wait before executing this chunk
+  crossChainTx: CrossChainTx | null  // Add this
+  blockDelay: number
 }
 
 export interface SplitResult {
@@ -176,7 +178,7 @@ export async function buildSplitPlan(
     const chunkSim = simulateChunkSandwich(chunkAmount, currentReserveIn, currentReserveOut)
 
     // Clean output for this chunk
-    const expectedOut = chunkSim.cleanOut
+    let expectedOut = chunkSim.cleanOut
 
     // Attacker economics for this specific chunk
     const attackerProfitEth = bigintToNumber(chunkSim.attackerProfit, 18)
@@ -202,7 +204,7 @@ export async function buildSplitPlan(
     // Min output: apply user's max slippage (default 0.5%)
     // For now hardcoded, will come from ENS policy later
     const slippageBps = 50n // 0.5%
-    const minOut = (expectedOut * (10000n - slippageBps)) / 10000n
+    let minOut = (expectedOut * (10000n - slippageBps)) / 10000n
 
     totalExpectedOut += expectedOut
     totalMinOut += minOut
@@ -229,11 +231,12 @@ export async function buildSplitPlan(
     // Block delay from LLM plan
     const blockDelay = plan.blockDelays?.[i] ?? (i === 0 ? 0 : 1)
 
-    // Build unsigned tx calldata for same-chain chunks
+    // Build transaction for this chunk
     let tx: ChunkExecution["tx"] = null
+    let crossChainTx: CrossChainTx | null = null
+
     if (route.type === "SAME_CHAIN") {
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 300) // 5 min
-      // Encode swapExactTokensForTokens calldata
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
       const { encodeFunctionData } = await import("viem")
       const data = encodeFunctionData({
         abi: routerAbi,
@@ -246,8 +249,25 @@ export async function buildSplitPlan(
         data,
         value: 0n,
       }
+    } else {
+      // Cross-chain: use LI.FI
+      crossChainTx = await buildCrossChainTx(
+        "ethereum",
+        route.chain,
+        tokenIn,
+        tokenOut,
+        chunkAmount,
+        intent.user
+      )
+
+      if (crossChainTx) {
+        // Update expected output based on LI.FI quote (accounts for bridge fees)
+        expectedOut = crossChainTx.estimatedOutput
+        minOut = crossChainTx.minOutput
+        
+        console.log(`   🌉 Chunk ${i} via LI.FI (${crossChainTx.tool}): ~${bigintToNumber(expectedOut, sim.outDecimals).toFixed(2)} output, $${(crossChainTx.feesUsd + crossChainTx.gasUsd).toFixed(2)} total fees`)
+      }
     }
-    // Cross-chain chunks would get LI.FI tx data — implemented in lifiRouter.ts
 
     chunks.push({
       index: i,
@@ -260,6 +280,7 @@ export async function buildSplitPlan(
       safeTx: chunkSafe,
       route,
       tx,
+      crossChainTx,
       blockDelay,
     })
 

@@ -125,6 +125,8 @@ export interface SandwichSimulation {
   ethPriceUsd: number
   poolThreat: PoolThreatProfile
   adjustedRisk: RiskLevel
+  tokenIn: string
+  tokenOut: string
 }
 
 export async function simulate(intent: SwapIntent): Promise<SandwichSimulation> {
@@ -284,6 +286,8 @@ export async function simulate(intent: SwapIntent): Promise<SandwichSimulation> 
       ethPriceUsd,
       poolThreat,
       adjustedRisk,
+      tokenIn: intent.tokenIn,
+      tokenOut: intent.tokenOut,
     }
   } catch (err) {
     console.error("❌ Simulation failed:", err)
@@ -334,5 +338,7 @@ function emptyResult(gasPrice: bigint): SandwichSimulation {
       lastUpdated: Date.now(),
     },
     adjustedRisk: "MEDIUM",
+    tokenIn: "",
+    tokenOut: "",
   }
 }

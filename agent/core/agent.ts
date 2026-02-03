@@ -32,6 +32,21 @@ export class MEVShieldAgent {
       safeTx: c.safeTx,
       route: c.route,
       blockDelay: c.blockDelay,
+      tx: c.tx ? {
+        to: c.tx.to,
+        data: c.tx.data.slice(0, 66) + "...", // Truncate for readability
+        value: c.tx.value.toString(),
+      } : null,
+      crossChainTx: c.crossChainTx ? {
+        to: c.crossChainTx.to,
+        tool: c.crossChainTx.tool,
+        chainId: c.crossChainTx.chainId,
+        feesUsd: c.crossChainTx.feesUsd,
+        gasUsd: c.crossChainTx.gasUsd,
+        executionDuration: c.crossChainTx.executionDuration,
+        estimatedOutput: c.crossChainTx.estimatedOutput.toString(),
+        minOutput: c.crossChainTx.minOutput.toString(),
+      } : null,
     }))
 
     const serializePrivateTx = execution.privateTxPlan

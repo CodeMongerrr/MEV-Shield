@@ -1,6 +1,7 @@
 import { SandwichSimulation } from "../perception/simulator"
 import { UserPolicy } from "../core/types"
 import { chainClients, getAvailableChains } from "../core/config"
+import { estimateCrossChainCost } from "../actions/lifiRouter"
 
 export interface ChunkPlan {
   count: number
@@ -11,16 +12,28 @@ export interface ChunkPlan {
   reasoning: string
   economics: ChunkEconomics[]
   totalCost: number
+  costBreakdown: CostBreakdown
+}
+
+export interface CostBreakdown {
+  totalMevExposure: number
+  totalUserGas: number
+  totalBridgeFees: number
+  totalCost: number
+  unprotectedCost: number
+  savings: number
+  savingsPercent: number
 }
 
 export interface ChainProfile {
   name: string
   available: boolean
   gasPriceGwei: number
-  sandwichGasCostUsd: number  // attacker's cost to sandwich on this chain
-  safeThresholdUsd: number    // chunk value below which attack is unprofitable
-  userSwapGasCostUsd: number  // user's cost to execute a swap on this chain
-  bridgeCostUsd: number       // cost to bridge from ethereum to this chain
+  sandwichGasCostUsd: number
+  safeThresholdUsd: number
+  userSwapGasCostUsd: number
+  bridgeCostUsd: number
+  bridgeCostReal: boolean // true if from LI.FI, false if estimated
 }
 
 export interface ChunkEconomics {
@@ -39,17 +52,53 @@ export interface ChunkEconomics {
 const SANDWICH_GAS_UNITS = 300000n
 const SWAP_GAS_UNITS = 180000n
 
-// Bridge costs are variable but we can estimate conservatively
-// These are rough averages for standard ERC20 bridges
-const BRIDGE_COST_ESTIMATES: Record<string, number> = {
-  ethereum: 0,      // no bridge needed
-  arbitrum: 2.50,   // ~$2-3 via native bridge or hop
-  base: 1.80,       // ~$1.50-2 via native bridge
+// Cache LI.FI quotes to avoid repeated API calls
+const bridgeCostCache = new Map<string, { cost: number; timestamp: number }>()
+const CACHE_TTL_MS = 60 * 1000 // 1 minute
+
+async function getRealBridgeCost(
+  fromChain: string,
+  toChain: string,
+  tokenIn: string,
+  tokenOut: string,
+  testAmount: bigint,
+  userAddress: string
+): Promise<number | null> {
+  const cacheKey = `${fromChain}-${toChain}-${tokenIn}-${tokenOut}`
+  const cached = bridgeCostCache.get(cacheKey)
+  
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return cached.cost
+  }
+
+  const estimate = await estimateCrossChainCost(
+    fromChain,
+    toChain,
+    tokenIn,
+    tokenOut,
+    testAmount,
+    userAddress
+  )
+
+  if (estimate) {
+    bridgeCostCache.set(cacheKey, { cost: estimate.totalCostUsd, timestamp: Date.now() })
+    return estimate.totalCostUsd
+  }
+
+  return null
 }
 
-export async function profileChains(ethPriceUsd: number): Promise<Record<string, ChainProfile>> {
+export async function profileChains(
+  ethPriceUsd: number,
+  tokenIn: string,
+  tokenOut: string,
+  testAmount: bigint,
+  userAddress: string
+): Promise<Record<string, ChainProfile>> {
   const profiles: Record<string, ChainProfile> = {}
   const chains = getAvailableChains()
+
+  console.log(`\n⛓️ Profiling chains with real bridge costs...`)
 
   for (const chainName of chains) {
     const entry = chainClients[chainName]
@@ -62,6 +111,7 @@ export async function profileChains(ethPriceUsd: number): Promise<Record<string,
         safeThresholdUsd: 0,
         userSwapGasCostUsd: 0,
         bridgeCostUsd: 0,
+        bridgeCostReal: false,
       }
       continue
     }
@@ -70,19 +120,37 @@ export async function profileChains(ethPriceUsd: number): Promise<Record<string,
       const gasPrice = await entry.client.getGasPrice()
       const gasPriceGwei = Number(gasPrice) / 1e9
 
-      // Attacker's sandwich cost on this chain
       const sandwichGasWei = SANDWICH_GAS_UNITS * gasPrice
       const sandwichGasCostUsd = (Number(sandwichGasWei) / 1e18) * ethPriceUsd
 
-      // User's swap cost on this chain
       const swapGasWei = SWAP_GAS_UNITS * gasPrice
       const userSwapGasCostUsd = (Number(swapGasWei) / 1e18) * ethPriceUsd
 
-      // Safe threshold: chunk must be below this to be unprofitable to attack
-      // Attacker needs profit > gas cost, so threshold = 2x gas cost (margin of safety)
       const safeThresholdUsd = sandwichGasCostUsd * 2
 
-      const bridgeCostUsd = BRIDGE_COST_ESTIMATES[chainName] ?? 3.0
+      // Get real bridge cost from LI.FI for non-ethereum chains
+      let bridgeCostUsd = 0
+      let bridgeCostReal = false
+      
+      if (chainName !== "ethereum") {
+        const realCost = await getRealBridgeCost(
+          "ethereum",
+          chainName,
+          tokenIn,
+          tokenOut,
+          testAmount,
+          userAddress
+        )
+        
+        if (realCost !== null) {
+          bridgeCostUsd = realCost
+          bridgeCostReal = true
+        } else {
+          // Fallback estimates (conservative)
+          bridgeCostUsd = chainName === "arbitrum" ? 15 : chainName === "base" ? 12 : 20
+          bridgeCostReal = false
+        }
+      }
 
       profiles[chainName] = {
         name: chainName,
@@ -92,14 +160,15 @@ export async function profileChains(ethPriceUsd: number): Promise<Record<string,
         safeThresholdUsd,
         userSwapGasCostUsd,
         bridgeCostUsd,
+        bridgeCostReal,
       }
 
+      const bridgeInfo = bridgeCostReal ? `$${bridgeCostUsd.toFixed(2)} (LI.FI)` : `~$${bridgeCostUsd.toFixed(2)} (est)`
       console.log(
         `⛓️ ${chainName}: gas=${gasPriceGwei.toFixed(3)} gwei | ` +
-        `attacker cost=$${sandwichGasCostUsd.toFixed(3)} | ` +
-        `safe threshold=$${safeThresholdUsd.toFixed(3)} | ` +
-        `user swap=$${userSwapGasCostUsd.toFixed(3)} | ` +
-        `bridge=$${bridgeCostUsd.toFixed(2)}`
+        `safe threshold=$${safeThresholdUsd.toFixed(2)} | ` +
+        `swap gas=$${userSwapGasCostUsd.toFixed(3)} | ` +
+        `bridge=${chainName === "ethereum" ? "N/A" : bridgeInfo}`
       )
     } catch (err) {
       console.log(`⛓️ ${chainName}: ❌ RPC failed — ${(err as Error).message}`)
@@ -111,6 +180,7 @@ export async function profileChains(ethPriceUsd: number): Promise<Record<string,
         safeThresholdUsd: 0,
         userSwapGasCostUsd: 0,
         bridgeCostUsd: 0,
+        bridgeCostReal: false,
       }
     }
   }
@@ -118,29 +188,33 @@ export async function profileChains(ethPriceUsd: number): Promise<Record<string,
   return profiles
 }
 
-// Core AMM math for MEV estimation per chunk
 function estimateChunkMev(chunkValueUsd: number, totalTradeUsd: number, fullTradeMevUsd: number): number {
-  // MEV scales roughly quadratically with trade size relative to pool
-  // mev(chunk) / mev(total) ≈ (chunk/total)^2
-  // This is because sandwich profit depends on price impact which is proportional to trade size
   const ratio = chunkValueUsd / totalTradeUsd
   return fullTradeMevUsd * ratio * ratio
 }
 
-// Find optimal chunk distribution minimizing total cost
 export async function optimizeChunks(
   sim: SandwichSimulation,
   policy: UserPolicy,
   tradeSizeUsd: number
 ): Promise<ChunkPlan> {
-  const ethPriceUsd = sim.cleanOutputRaw > 0n && sim.outDecimals > 0
-    ? Number(sim.cleanOutputRaw) / 10 ** sim.outDecimals
-    : 2500
+  const ethPriceUsd = sim.ethPriceUsd
 
   console.log(`\n🧮 Optimizing chunks for $${tradeSizeUsd.toFixed(2)} trade...`)
+  console.log(`📊 Unprotected MEV loss: $${sim.estimatedLossUsd.toFixed(2)}`)
 
-  // Profile all available chains
-  const chainProfiles = await profileChains(ethPriceUsd)
+  // Use 10% of trade as test amount for bridge quotes
+  const testAmount = sim.reserveIn / 10n > 0n ? sim.reserveIn / 10n : 1000000000000000000n
+
+  // Profile chains with real bridge costs
+  const chainProfiles = await profileChains(
+    ethPriceUsd,
+    sim.tokenIn,
+    sim.tokenOut,
+    testAmount,
+    "0x0000000000000000000000000000000000000001"
+  )
+
   const availableChains = Object.entries(chainProfiles)
     .filter(([_, p]) => p.available)
     .map(([name]) => name)
@@ -148,12 +222,23 @@ export async function optimizeChunks(
   console.log(`⛓️ Available chains: ${availableChains.join(", ")}`)
 
   if (availableChains.length === 0) {
-    console.log("❌ No chains available")
     return singleChunkFallback(tradeSizeUsd, sim)
   }
 
-  // For each possible chunk count (2-7), find the best distribution
-  // Then pick the chunk count with lowest total cost
+  // Check if cross-chain is even worth it
+  const minBridgeCost = Math.min(
+    ...Object.values(chainProfiles)
+      .filter(p => p.available && p.name !== "ethereum")
+      .map(p => p.bridgeCostUsd)
+  )
+
+  const crossChainWorthIt = minBridgeCost < sim.estimatedLossUsd / 7 // Bridge must be cheaper than ~14% of MEV loss per chunk
+
+  if (!crossChainWorthIt) {
+    console.log(`⚠️ Bridge costs ($${minBridgeCost.toFixed(2)}+) too high for cross-chain. Staying on Ethereum.`)
+  }
+
+  // Evaluate chunk counts 2-7
   let bestPlan: ChunkPlan | null = null
   let bestTotalCost = Infinity
 
@@ -163,7 +248,7 @@ export async function optimizeChunks(
       tradeSizeUsd,
       sim.estimatedLossUsd,
       chainProfiles,
-      availableChains,
+      crossChainWorthIt ? availableChains : ["ethereum"],
       policy
     )
 
@@ -172,19 +257,45 @@ export async function optimizeChunks(
       bestPlan = plan
     }
 
-    console.log(`   ${numChunks} chunks: total cost = $${plan.totalCost.toFixed(2)} (mev=$${plan.economics.reduce((s, e) => s + e.mevExposureUsd, 0).toFixed(2)} + gas=$${plan.economics.reduce((s, e) => s + e.userGasCostUsd, 0).toFixed(2)} + bridge=$${plan.economics.reduce((s, e) => s + e.bridgeCostUsd, 0).toFixed(2)})`)
+    const breakdown = plan.costBreakdown
+    console.log(
+      `   ${numChunks} chunks: ` +
+      `MEV=$${breakdown.totalMevExposure.toFixed(2)} + ` +
+      `Gas=$${breakdown.totalUserGas.toFixed(2)} + ` +
+      `Bridge=$${breakdown.totalBridgeFees.toFixed(2)} = ` +
+      `$${breakdown.totalCost.toFixed(2)} ` +
+      `(saves $${breakdown.savings.toFixed(2)}, ${breakdown.savingsPercent.toFixed(1)}%)`
+    )
   }
 
   if (!bestPlan) return singleChunkFallback(tradeSizeUsd, sim)
 
-  console.log(`\n✅ Optimal: ${bestPlan.count} chunks, total cost $${bestPlan.totalCost.toFixed(2)}`)
+  // Print final summary
+  const b = bestPlan.costBreakdown
+  console.log(`\n✅ Optimal: ${bestPlan.count} chunks`)
+  console.log(`┌─────────────────────────────────────────────────────┐`)
+  console.log(`│  COST BREAKDOWN                                     │`)
+  console.log(`├─────────────────────────────────────────────────────┤`)
+  console.log(`│  Unprotected MEV loss:     $${b.unprotectedCost.toFixed(2).padStart(10)}            │`)
+  console.log(`│  ─────────────────────────────────────────────────  │`)
+  console.log(`│  With MEV Shield:                                   │`)
+  console.log(`│    MEV exposure:           $${b.totalMevExposure.toFixed(2).padStart(10)}            │`)
+  console.log(`│    User gas fees:          $${b.totalUserGas.toFixed(2).padStart(10)}            │`)
+  console.log(`│    Bridge fees:            $${b.totalBridgeFees.toFixed(2).padStart(10)}            │`)
+  console.log(`│  ─────────────────────────────────────────────────  │`)
+  console.log(`│  TOTAL COST:               $${b.totalCost.toFixed(2).padStart(10)}            │`)
+  console.log(`│  SAVINGS:                  $${b.savings.toFixed(2).padStart(10)} (${b.savingsPercent.toFixed(1)}%)     │`)
+  console.log(`└─────────────────────────────────────────────────────┘`)
+
   bestPlan.economics.forEach((e, i) => {
+    const safeIcon = e.safe ? "✅" : "⚠️"
     console.log(
       `   Chunk ${i}: ${e.sizePercent}% = $${e.valueUsd.toFixed(0)} on ${e.chain} | ` +
       `mev=$${e.mevExposureUsd.toFixed(2)} gas=$${e.userGasCostUsd.toFixed(2)} bridge=$${e.bridgeCostUsd.toFixed(2)} | ` +
-      `total=$${e.totalCostUsd.toFixed(2)} ${e.safe ? "✅" : "⚠️"} | delay=${e.blockDelay}`
+      `total=$${e.totalCostUsd.toFixed(2)} ${safeIcon} | delay=${e.blockDelay}`
     )
   })
+
   console.log(`   Reasoning: ${bestPlan.reasoning}\n`)
 
   return bestPlan
@@ -197,10 +308,10 @@ function optimizeForChunkCount(
   chainProfiles: Record<string, ChainProfile>,
   availableChains: string[],
   policy: UserPolicy
-): ChunkPlan & { totalCost: number } {
+): ChunkPlan {
   const dollarPerPercent = tradeSizeUsd / 100
 
-  // Step 1: Calculate base even split
+  // Calculate base even split with randomization
   const basePercent = Math.floor(100 / numChunks)
   const remainder = 100 - basePercent * numChunks
   const sizes: number[] = []
@@ -208,25 +319,23 @@ function optimizeForChunkCount(
     sizes.push(basePercent + (i < remainder ? 1 : 0))
   }
 
-  // Step 2: Add controlled randomization (±20% of base, keeping sum at 100)
-  // Swap random pairs to create unequal distribution
+  // Add controlled randomization
   for (let i = 0; i < numChunks - 1; i++) {
     const maxShift = Math.max(1, Math.floor(sizes[i] * 0.3))
     const shift = Math.floor(Math.random() * maxShift) + 1
-    // Only shift if both chunks stay >= 2%
     if (sizes[i] - shift >= 2 && sizes[i + 1] + shift <= 50) {
       sizes[i] -= shift
       sizes[i + 1] += shift
     }
   }
 
-  // Shuffle so the pattern isn't always small-to-large
+  // Shuffle
   for (let i = sizes.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1))
     ;[sizes[i], sizes[j]] = [sizes[j], sizes[i]]
   }
 
-  // Step 3: Assign each chunk to the chain that minimizes its cost
+  // Assign chains to minimize cost
   const economics: ChunkEconomics[] = []
   const chainUsageCounts: Record<string, number> = {}
   availableChains.forEach((c) => (chainUsageCounts[c] = 0))
@@ -235,7 +344,7 @@ function optimizeForChunkCount(
     const chunkValueUsd = sizes[i] * dollarPerPercent
     const chunkMevUsd = estimateChunkMev(chunkValueUsd, tradeSizeUsd, fullMevUsd)
 
-    // First chunk must be ethereum (no bridge delay)
+    // First chunk must be ethereum
     if (i === 0) {
       const profile = chainProfiles["ethereum"]!
       const safe = chunkValueUsd <= profile.safeThresholdUsd
@@ -255,7 +364,7 @@ function optimizeForChunkCount(
       continue
     }
 
-    // For remaining chunks: evaluate each chain and pick lowest total cost
+    // Evaluate each chain
     let bestChain = "ethereum"
     let bestCost = Infinity
     let bestEcon: ChunkEconomics | null = null
@@ -269,7 +378,7 @@ function optimizeForChunkCount(
       const gasCost = profile.userSwapGasCostUsd
       const bridgeCost = profile.bridgeCostUsd
 
-      // Penalize overusing a single chain — attackers can detect patterns on one chain
+      // Penalize overusing one chain
       const usagePenalty = chainUsageCounts[chainName] > 1 ? chainUsageCounts[chainName] * 0.5 : 0
 
       const totalCost = mevCost + gasCost + bridgeCost + usagePenalty
@@ -285,9 +394,9 @@ function optimizeForChunkCount(
           mevExposureUsd: mevCost,
           userGasCostUsd: gasCost,
           bridgeCostUsd: bridgeCost,
-          totalCostUsd: mevCost + gasCost + bridgeCost, // don't include penalty in reported cost
+          totalCostUsd: mevCost + gasCost + bridgeCost,
           safe,
-          blockDelay: 0, // assigned below
+          blockDelay: 0,
         }
       }
     }
@@ -298,15 +407,12 @@ function optimizeForChunkCount(
     }
   }
 
-  // Step 4: Assign block delays
-  // Goal: spread chunks across blocks, more delay for conservative profiles
+  // Assign block delays
   const delayMultiplier = policy.riskProfile === "conservative" ? 2 : policy.riskProfile === "aggressive" ? 1 : 1
   for (let i = 0; i < economics.length; i++) {
     if (i === 0) {
       economics[i].blockDelay = 0
     } else {
-      // Stagger: 1-3 blocks between each chunk
-      // Cross-chain chunks need more delay (bridge confirmation)
       const isXChain = economics[i].chain !== "ethereum"
       const baseDelay = isXChain ? 2 : 1
       economics[i].blockDelay = Math.min(baseDelay * delayMultiplier, 4)
@@ -318,14 +424,24 @@ function optimizeForChunkCount(
   const totalGas = economics.reduce((s, e) => s + e.userGasCostUsd, 0)
   const totalBridge = economics.reduce((s, e) => s + e.bridgeCostUsd, 0)
   const totalCost = totalMev + totalGas + totalBridge
-  const allSafe = economics.every((e) => e.safe)
+  const savings = fullMevUsd - totalCost
+  const savingsPercent = fullMevUsd > 0 ? (savings / fullMevUsd) * 100 : 0
 
+  const allSafe = economics.every((e) => e.safe)
   const usedChains = [...new Set(economics.map((e) => e.chain))]
   const crossChain = usedChains.length > 1
 
-  const executionBlocks = economics.reduce((max, e) => Math.max(max, e.blockDelay), 0) + 1
+  const costBreakdown: CostBreakdown = {
+    totalMevExposure: totalMev,
+    totalUserGas: totalGas,
+    totalBridgeFees: totalBridge,
+    totalCost,
+    unprotectedCost: fullMevUsd,
+    savings,
+    savingsPercent,
+  }
 
-  const reasoning = buildReasoning(numChunks, economics, totalMev, totalGas, totalBridge, fullMevUsd, allSafe, usedChains)
+  const reasoning = buildReasoning(numChunks, usedChains, costBreakdown, allSafe)
 
   return {
     count: numChunks,
@@ -336,42 +452,47 @@ function optimizeForChunkCount(
     reasoning,
     economics,
     totalCost,
+    costBreakdown,
   }
 }
 
 function buildReasoning(
   numChunks: number,
-  economics: ChunkEconomics[],
-  totalMev: number,
-  totalGas: number,
-  totalBridge: number,
-  originalMev: number,
-  allSafe: boolean,
-  usedChains: string[]
+  usedChains: string[],
+  breakdown: CostBreakdown,
+  allSafe: boolean
 ): string {
-  const mevReduction = originalMev > 0 ? ((1 - totalMev / originalMev) * 100).toFixed(1) : "100"
-  const unsafeCount = economics.filter((e) => !e.safe).length
-
-  let reasoning = `${numChunks} chunks across ${usedChains.join("+")} reduces MEV exposure by ${mevReduction}%. `
-  reasoning += `User overhead: $${(totalGas + totalBridge).toFixed(2)} (gas $${totalGas.toFixed(2)} + bridge $${totalBridge.toFixed(2)}). `
+  let reasoning = `${numChunks} chunks across ${usedChains.join("+")}. `
+  reasoning += `Saves $${breakdown.savings.toFixed(2)} (${breakdown.savingsPercent.toFixed(1)}% of MEV loss). `
+  reasoning += `User pays $${(breakdown.totalUserGas + breakdown.totalBridgeFees).toFixed(2)} in fees. `
 
   if (allSafe) {
-    reasoning += `All chunks below safe threshold — no chunk is profitable to sandwich.`
+    reasoning += `All chunks below sandwich threshold.`
   } else {
-    reasoning += `${unsafeCount} chunk(s) still above safe threshold — consider private relay for those.`
+    reasoning += `Some chunks still above threshold — private relay recommended.`
   }
 
   return reasoning
 }
 
 function singleChunkFallback(tradeSizeUsd: number, sim: SandwichSimulation): ChunkPlan {
+  const costBreakdown: CostBreakdown = {
+    totalMevExposure: sim.estimatedLossUsd,
+    totalUserGas: 0,
+    totalBridgeFees: 0,
+    totalCost: sim.estimatedLossUsd,
+    unprotectedCost: sim.estimatedLossUsd,
+    savings: 0,
+    savingsPercent: 0,
+  }
+
   return {
     count: 1,
     sizes: [100],
     chains: ["ethereum"],
     blockDelays: [0],
     crossChain: false,
-    reasoning: "No optimization possible — single chain only.",
+    reasoning: "No optimization possible — single chunk on Ethereum.",
     economics: [{
       index: 0,
       sizePercent: 100,
@@ -385,5 +506,6 @@ function singleChunkFallback(tradeSizeUsd: number, sim: SandwichSimulation): Chu
       blockDelay: 0,
     }],
     totalCost: sim.estimatedLossUsd,
+    costBreakdown,
   }
 }
