@@ -16,7 +16,10 @@ export async function decide(
   policy: UserPolicy,
   tradeSizeUsd: number
 ): Promise<Strategy> {
-  console.log(`\n🧠 Deciding: risk=${sim.risk}, viable=${sim.attackViable}, trade=$${tradeSizeUsd.toFixed(2)}, gasCost=$${sim.gasData.sandwichGasCostUsd.toFixed(2)}`)
+  // Use adjustedRisk which factors in historical pool threat data
+  const risk = sim.adjustedRisk
+
+  console.log(`\n🧠 Deciding: risk=${risk} (base=${sim.risk}), viable=${sim.attackViable}, trade=$${tradeSizeUsd.toFixed(2)}, gasCost=$${sim.gasData.sandwichGasCostUsd.toFixed(2)}`)
 
   if (!sim.attackViable) {
     return {
@@ -25,7 +28,14 @@ export async function decide(
     }
   }
 
-  if (sim.risk === "MEDIUM" && tradeSizeUsd <= policy.privateThresholdUsd) {
+  if (risk === "LOW") {
+    return {
+      type: "DIRECT",
+      reasoning: `Low risk after historical analysis. Pool has minimal MEV activity.`,
+    }
+  }
+
+  if (risk === "MEDIUM" && tradeSizeUsd <= policy.privateThresholdUsd) {
     return {
       type: "MEV_ROUTE",
       reasoning: `Medium risk, trade ($${tradeSizeUsd.toFixed(0)}) below threshold ($${policy.privateThresholdUsd}). Safer pool routing.`,
@@ -36,7 +46,6 @@ export async function decide(
   const plan = await optimizeChunks(sim, policy, tradeSizeUsd)
 
   // Check if splitting actually helps vs just paying for private relay
-  // If total split cost > original MEV loss, splitting isn't worth it
   if (plan.totalCost >= sim.estimatedLossUsd) {
     return {
       type: "PRIVATE",
@@ -44,14 +53,13 @@ export async function decide(
     }
   }
 
-  if (sim.risk === "CRITICAL") {
-    // Check if any chunks are still unsafe
+  if (risk === "CRITICAL") {
     const unsafeChunks = plan.economics.filter((e) => !e.safe)
     if (unsafeChunks.length > 0) {
       return {
         type: "FULL_SHIELD",
         plan,
-        reasoning: `Critical risk. ${plan.count} optimized chunks but ${unsafeChunks.length} still unsafe — adding private relay.`,
+        reasoning: `Critical risk known attackers, ${(sim.poolThreat.sandwichRate * 100).toFixed(1)}% sandwich rate). ${plan.count} chunks but ${unsafeChunks.length} still unsafe — adding private relay.`,
       }
     }
   }
@@ -59,6 +67,6 @@ export async function decide(
   return {
     type: "SPLIT",
     plan,
-    reasoning: `${sim.risk} risk. Optimizer chose ${plan.count} chunks across ${[...new Set(plan.chains)].join("+")}. Cost: $${plan.totalCost.toFixed(2)} vs $${sim.estimatedLossUsd.toFixed(2)} unprotected.`,
+    reasoning: `${risk} risk. Optimizer chose ${plan.count} chunks across ${[...new Set(plan.chains)].join("+")}. Cost: $${plan.totalCost.toFixed(2)} vs $${sim.estimatedLossUsd.toFixed(2)} unprotected. Pool history: ${(sim.poolThreat.sandwichRate * 100).toFixed(1)}% sandwich rate, $${sim.poolThreat.totalMevExtractedUsd.toFixed(0)} extracted from ${sim.poolThreat.analyzedSwaps} swaps.`,
   }
 }
