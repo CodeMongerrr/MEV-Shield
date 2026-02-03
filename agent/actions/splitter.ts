@@ -1,8 +1,7 @@
 import { SwapIntent } from "../core/types"
 import { ChunkPlan } from "../reasoning/chunkOptimizer"
 import { SandwichSimulation } from "../perception/simulator"
-import { publicClient } from "../core/config"
-import { parseAbi, getAddress } from "viem"
+import { parseAbi } from "viem"
 import { buildCrossChainTx, CrossChainTx } from "./lifiRouter"
 
 const UNISWAP_V2_ROUTER = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D" as const
@@ -11,6 +10,16 @@ const routerAbi = parseAbi([
   "function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)",
   "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)",
 ])
+
+/* ---------------- FIXED POINT % MATH ---------------- */
+
+const PERCENT_SCALE = 1_000_000n as bigint
+const HUNDRED_PERCENT = 100n * PERCENT_SCALE
+
+function percentToScaled(p: number): bigint {
+  return BigInt(Math.round(p * 1_000_000))
+}
+/* ---------------- TYPES (UNCHANGED) ---------------- */
 
 export interface ChunkExecution {
   index: number
@@ -32,7 +41,7 @@ export interface ChunkExecution {
     data: `0x${string}`
     value: bigint
   } | null
-  crossChainTx: CrossChainTx | null  // Add this
+  crossChainTx: CrossChainTx | null
   blockDelay: number
 }
 
@@ -42,22 +51,19 @@ export interface SplitResult {
   totalMinOut: bigint
   totalMevExposureUsd: number
   allChunksSafe: boolean
-  executionBlocks: number // total blocks the full split spans
+  executionBlocks: number
 }
 
-// Replicate AMM math here so we can simulate each chunk sequentially
-// against progressively shifted reserves
+/* ---------------- AMM MATH ---------------- */
+
 function getAmountOut(amountIn: bigint, reserveIn: bigint, reserveOut: bigint): bigint {
   if (amountIn <= 0n || reserveIn <= 0n || reserveOut <= 0n) return 0n
   const amountInWithFee = amountIn * 997n
-  const numerator = amountInWithFee * reserveOut
-  const denominator = reserveIn * 1000n + amountInWithFee
-  return numerator / denominator
+  return (amountInWithFee * reserveOut) / (reserveIn * 1000n + amountInWithFee)
 }
 
 function sqrt(value: bigint): bigint {
-  if (value <= 0n) return 0n
-  if (value <= 3n) return 1n
+  if (value <= 3n) return value > 0n ? 1n : 0n
   let z = value
   let x = value / 2n + 1n
   while (x < z) {
@@ -68,27 +74,16 @@ function sqrt(value: bigint): bigint {
 }
 
 function calculateOptimalFrontrun(reserveIn: bigint, userAmountIn: bigint): bigint {
-  const gamma = 997n
-  const base = 1000n
-  const gammaR = (gamma * reserveIn) / base
-  const gammaUser = (gamma * userAmountIn) / base
-  const underSqrt = gammaR * (gammaR + gammaUser)
-  const sqrtVal = sqrt(underSqrt)
-  if (sqrtVal <= gammaR) return 0n
-  return sqrtVal - gammaR
+  const gammaR = (997n * reserveIn) / 1000n
+  const gammaUser = (997n * userAmountIn) / 1000n
+  const root = sqrt(gammaR * (gammaR + gammaUser))
+  return root > gammaR ? root - gammaR : 0n
 }
 
-function simulateChunkSandwich(
-  amountIn: bigint,
-  reserveIn: bigint,
-  reserveOut: bigint
-): { cleanOut: bigint; attackerProfit: bigint; userLoss: bigint } {
+function simulateChunkSandwich(amountIn: bigint, reserveIn: bigint, reserveOut: bigint) {
   const cleanOut = getAmountOut(amountIn, reserveIn, reserveOut)
-
   const frontrun = calculateOptimalFrontrun(reserveIn, amountIn)
-  if (frontrun <= 0n) {
-    return { cleanOut, attackerProfit: 0n, userLoss: 0n }
-  }
+  if (frontrun === 0n) return { cleanOut, attackerProfit: 0n, userLoss: 0n }
 
   const attackerBought = getAmountOut(frontrun, reserveIn, reserveOut)
   const rIn1 = reserveIn + frontrun
@@ -99,69 +94,47 @@ function simulateChunkSandwich(
   const rOut2 = rOut1 - attackedOut
 
   const attackerSellRevenue = getAmountOut(attackerBought, rOut2, rIn2)
-  const attackerProfit = attackerSellRevenue > frontrun
-    ? attackerSellRevenue - frontrun
-    : 0n
-
+  const attackerProfit = attackerSellRevenue > frontrun ? attackerSellRevenue - frontrun : 0n
   const userLoss = cleanOut > attackedOut ? cleanOut - attackedOut : 0n
 
   return { cleanOut, attackerProfit, userLoss }
 }
 
 function bigintToNumber(val: bigint, decimals: number): number {
-  const str = val.toString()
-  if (str.length <= decimals) {
-    return Number(val) / 10 ** decimals
-  }
-  const whole = str.slice(0, str.length - decimals)
-  const frac = str.slice(str.length - decimals, str.length - decimals + 6)
-  return parseFloat(`${whole}.${frac}`)
+  return Number(val) / 10 ** decimals
 }
 
-// Cross-chain target chains for splitting
-const CROSS_CHAIN_TARGETS = [
-  { chain: "ethereum", chainId: 1 },
-  { chain: "arbitrum", chainId: 42161 },
-  { chain: "base", chainId: 8453 },
-]
+/* ---------------- MAIN ENGINE ---------------- */
 
 export async function buildSplitPlan(
   intent: SwapIntent,
   plan: ChunkPlan,
   sim: SandwichSimulation
 ): Promise<SplitResult> {
-  const amountIn = BigInt(intent.amountIn)
+
+  const amountIn: bigint =
+  typeof intent.amountIn === "bigint"
+    ? intent.amountIn
+    : BigInt(intent.amountIn)
   const tokenIn = intent.tokenIn as `0x${string}`
   const tokenOut = intent.tokenOut as `0x${string}`
 
-  // Current gas economics
-  const gasPrice = sim.gasData.gasPriceWei
-  const sandwichGasCostWei = 300000n * gasPrice
+  /* SAFE SPLIT */
 
-  // ETH price from simulation data
-  const ethPriceUsd = sim.cleanOutputRaw > 0n && amountIn > 0n
-    ? bigintToNumber(sim.cleanOutputRaw, sim.outDecimals) / bigintToNumber(amountIn, 18)
-    : 2500
-
-  const sandwichGasCostUsd = bigintToNumber(sandwichGasCostWei, 18) * ethPriceUsd
-
-  // Convert percentage sizes to actual bigint amounts
-  // Must handle remainder so total = exact amountIn
   const chunkAmounts: bigint[] = []
   let allocated = 0n
+
   for (let i = 0; i < plan.sizes.length; i++) {
     if (i === plan.sizes.length - 1) {
-      // Last chunk gets the remainder — no dust left behind
       chunkAmounts.push(amountIn - allocated)
     } else {
-      const chunk = (amountIn * BigInt(plan.sizes[i])) / 100n
+      const scaled = percentToScaled(plan.sizes[i])
+      const chunk = (amountIn * scaled) / HUNDRED_PERCENT
       chunkAmounts.push(chunk)
       allocated += chunk
     }
   }
 
-  // Simulate each chunk sequentially against progressively shifting reserves
-  // After chunk N executes, the pool reserves change, affecting chunk N+1
   let currentReserveIn = sim.reserveIn
   let currentReserveOut = sim.reserveOut
 
@@ -171,89 +144,64 @@ export async function buildSplitPlan(
   let totalMevExposure = 0
   let allSafe = true
 
+  const gasPrice = sim.gasData.gasPriceWei
+  const sandwichGasCostWei = 300000n * gasPrice
+
+  const ethPriceUsd =
+    bigintToNumber(sim.cleanOutputRaw, sim.outDecimals) /
+    bigintToNumber(amountIn, 18)
+
+  const sandwichGasCostUsd =
+    bigintToNumber(sandwichGasCostWei, 18) * ethPriceUsd
+
   for (let i = 0; i < chunkAmounts.length; i++) {
     const chunkAmount = chunkAmounts[i]
-
-    // Simulate this chunk's sandwich against current reserves
     const chunkSim = simulateChunkSandwich(chunkAmount, currentReserveIn, currentReserveOut)
 
-    // Clean output for this chunk
     let expectedOut = chunkSim.cleanOut
 
-    // Attacker economics for this specific chunk
-    const attackerProfitEth = bigintToNumber(chunkSim.attackerProfit, 18)
-    const attackerProfitUsd = attackerProfitEth * ethPriceUsd
-    const chunkSafe = attackerProfitUsd <= sandwichGasCostUsd
+    const attackerProfitUsd =
+      bigintToNumber(chunkSim.attackerProfit, 18) * ethPriceUsd
 
+    const chunkSafe = attackerProfitUsd <= sandwichGasCostUsd
     if (!chunkSafe) allSafe = false
 
-    // MEV exposure for this chunk
     const chunkLossUsd = bigintToNumber(chunkSim.userLoss, sim.outDecimals)
     totalMevExposure += chunkLossUsd
 
-    // Price impact: how much does this chunk alone move the price?
-    // (expectedOut / chunkAmount) vs (reserveOut / reserveIn) = spot price
-    const spotPrice = currentReserveIn > 0n
-      ? bigintToNumber(currentReserveOut, sim.outDecimals) / bigintToNumber(currentReserveIn, 18)
-      : 0
-    const execPrice = chunkAmount > 0n
-      ? bigintToNumber(expectedOut, sim.outDecimals) / bigintToNumber(chunkAmount, 18)
-      : 0
-    const priceImpact = spotPrice > 0 ? ((spotPrice - execPrice) / spotPrice) * 100 : 0
+    const spotPrice =
+      bigintToNumber(currentReserveOut, sim.outDecimals) /
+      bigintToNumber(currentReserveIn, 18)
 
-    // Min output: apply user's max slippage (default 0.5%)
-    // For now hardcoded, will come from ENS policy later
-    const slippageBps = 50n // 0.5%
-    let minOut = (expectedOut * (10000n - slippageBps)) / 10000n
+    const execPrice =
+      bigintToNumber(expectedOut, sim.outDecimals) /
+      bigintToNumber(chunkAmount, 18)
+
+    const priceImpact = ((spotPrice - execPrice) / spotPrice) * 100
+
+    const minOut = (expectedOut * 9950n) / 10000n
 
     totalExpectedOut += expectedOut
     totalMinOut += minOut
 
-    // Assign route: distribute across chains if cross-chain enabled
-    const assignedChain = plan.chains?.[i] || "ethereum"
-    let route: ChunkExecution["route"]
-    if (assignedChain !== "ethereum") {
-      route = {
-        type: "CROSS_CHAIN",
-        chain: assignedChain,
-        dex: "lifi",
-        path: [tokenIn, tokenOut],
-      }
-    } else {
-      route = {
-        type: "SAME_CHAIN",
-        chain: "ethereum",
-        dex: "uniswap_v2",
-        path: [tokenIn, tokenOut],
-      }
-    }
-
-    // Block delay from LLM plan
-    const blockDelay = plan.blockDelays?.[i] ?? (i === 0 ? 0 : 1)
-
-    // Build transaction for this chunk
     let tx: ChunkExecution["tx"] = null
     let crossChainTx: CrossChainTx | null = null
 
-    if (route.type === "SAME_CHAIN") {
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
+    if (!plan.chains?.[i] || plan.chains[i] === "ethereum") {
       const { encodeFunctionData } = await import("viem")
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 300)
+
       const data = encodeFunctionData({
         abi: routerAbi,
         functionName: "swapExactTokensForTokens",
         args: [chunkAmount, minOut, [tokenIn, tokenOut], intent.user as `0x${string}`, deadline],
       })
 
-      tx = {
-        to: UNISWAP_V2_ROUTER,
-        data,
-        value: 0n,
-      }
+      tx = { to: UNISWAP_V2_ROUTER, data, value: 0n }
     } else {
-      // Cross-chain: use LI.FI
       crossChainTx = await buildCrossChainTx(
         "ethereum",
-        route.chain,
+        plan.chains[i],
         tokenIn,
         tokenOut,
         chunkAmount,
@@ -261,11 +209,7 @@ export async function buildSplitPlan(
       )
 
       if (crossChainTx) {
-        // Update expected output based on LI.FI quote (accounts for bridge fees)
         expectedOut = crossChainTx.estimatedOutput
-        minOut = crossChainTx.minOutput
-        
-        console.log(`   🌉 Chunk ${i} via LI.FI (${crossChainTx.tool}): ~${bigintToNumber(expectedOut, sim.outDecimals).toFixed(2)} output, $${(crossChainTx.feesUsd + crossChainTx.gasUsd).toFixed(2)} total fees`)
       }
     }
 
@@ -278,37 +222,20 @@ export async function buildSplitPlan(
       priceImpactPercent: Number(priceImpact.toFixed(4)),
       mevExposureUsd: Number(chunkLossUsd.toFixed(2)),
       safeTx: chunkSafe,
-      route,
+      route: {
+        type: crossChainTx ? "CROSS_CHAIN" : "SAME_CHAIN",
+        chain: crossChainTx ? plan.chains[i] : "ethereum",
+        dex: crossChainTx ? "lifi" : "uniswap_v2",
+        path: [tokenIn, tokenOut],
+      },
       tx,
       crossChainTx,
-      blockDelay,
+      blockDelay: plan.blockDelays?.[i] ?? (i === 0 ? 0 : 1),
     })
 
-    // Update reserves for next chunk simulation
-    // After this chunk executes (clean, no attacker), reserves shift
-    currentReserveIn = currentReserveIn + chunkAmount
-    currentReserveOut = currentReserveOut - expectedOut
-
-    console.log(
-      `📦 Chunk ${i}: ${plan.sizes[i]}% | ` +
-      `in=${bigintToNumber(chunkAmount, 18).toFixed(4)} ETH | ` +
-      `out=$${bigintToNumber(expectedOut, sim.outDecimals).toFixed(2)} | ` +
-      `impact=${priceImpact.toFixed(3)}% | ` +
-      `mev=$${chunkLossUsd.toFixed(2)} | ` +
-      `safe=${chunkSafe} | ` +
-      `${route.type}:${route.chain} | ` +
-      `delay=${blockDelay} blocks`
-    )
+    currentReserveIn += chunkAmount
+    currentReserveOut -= expectedOut
   }
-
-  const executionBlocks = chunks.reduce((max, c) => Math.max(max, c.blockDelay), 0) + 1
-
-  console.log(`\n📊 Split Summary:`)
-  console.log(`   Total expected: $${bigintToNumber(totalExpectedOut, sim.outDecimals).toFixed(2)}`)
-  console.log(`   Total min out:  $${bigintToNumber(totalMinOut, sim.outDecimals).toFixed(2)}`)
-  console.log(`   Total MEV exposure: $${totalMevExposure.toFixed(2)}`)
-  console.log(`   All chunks safe: ${allSafe}`)
-  console.log(`   Execution span: ${executionBlocks} blocks\n`)
 
   return {
     chunks,
@@ -316,6 +243,6 @@ export async function buildSplitPlan(
     totalMinOut,
     totalMevExposureUsd: Number(totalMevExposure.toFixed(2)),
     allChunksSafe: allSafe,
-    executionBlocks,
+    executionBlocks: chunks.reduce((m, c) => Math.max(m, c.blockDelay), 0) + 1,
   }
 }
