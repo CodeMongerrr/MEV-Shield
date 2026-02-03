@@ -1,15 +1,24 @@
 import { SwapIntent } from "./types"
 import { simulate } from "../perception/simulator"
 import { fetchUserPolicy } from "../perception/ens"
+import { analyzePoolHistory } from "../perception/poolHistory/analyzer"
 import { decide } from "../reasoning/decisionEngine"
 import { execute } from "../actions/executor"
 
 export class MEVShieldAgent {
-  async handleSwap(intent: SwapIntent) {
+  async handleSwap(intent: SwapIntent & { poolAddress?: string }) {
     console.log("🛡 Agent received swap intent:", intent.tokenIn, "→", intent.tokenOut)
 
     const policy = await fetchUserPolicy(intent.user)
     const sim = await simulate(intent)
+
+    // Pool history analysis
+    let poolAnalysis = null
+    if (intent.poolAddress) {
+      console.log("📊 Analyzing pool history for:", intent.poolAddress)
+      poolAnalysis = await analyzePoolHistory(intent.poolAddress, 30)
+      console.log(`   Toxicity: ${poolAnalysis.toxicityScore} | Attack Rate: ${(poolAnalysis.overallAttackRate * 100).toFixed(1)}% | Searchers: ${poolAnalysis.uniqueSearchers}`)
+    }
 
     const tradeSizeUsd = sim.cleanOutputRaw > 0n
       ? Number(sim.cleanOutputRaw) / 10 ** sim.outDecimals
@@ -48,12 +57,49 @@ export class MEVShieldAgent {
         }
       : null
 
+    const serializePoolAnalysis = poolAnalysis
+      ? {
+          poolAddress: poolAnalysis.poolAddress,
+          totalTransactions: poolAnalysis.totalTransactions,
+          toxicityScore: poolAnalysis.toxicityScore,
+          overallAttackRate: Number((poolAnalysis.overallAttackRate * 100).toFixed(2)),
+          sandwichCount: poolAnalysis.sandwichAttacks.length,
+          bucketStats: {
+            LOW: {
+              totalSwaps: poolAnalysis.bucketStats.LOW.totalSwaps,
+              sandwichedSwaps: poolAnalysis.bucketStats.LOW.sandwichedSwaps,
+              attackRate: Number((poolAnalysis.bucketStats.LOW.attackRate * 100).toFixed(2)),
+              avgExtractionPercent: Number(poolAnalysis.bucketStats.LOW.avgExtractionPercent.toFixed(3)),
+            },
+            MEDIUM: {
+              totalSwaps: poolAnalysis.bucketStats.MEDIUM.totalSwaps,
+              sandwichedSwaps: poolAnalysis.bucketStats.MEDIUM.sandwichedSwaps,
+              attackRate: Number((poolAnalysis.bucketStats.MEDIUM.attackRate * 100).toFixed(2)),
+              avgExtractionPercent: Number(poolAnalysis.bucketStats.MEDIUM.avgExtractionPercent.toFixed(3)),
+            },
+            HIGH: {
+              totalSwaps: poolAnalysis.bucketStats.HIGH.totalSwaps,
+              sandwichedSwaps: poolAnalysis.bucketStats.HIGH.sandwichedSwaps,
+              attackRate: Number((poolAnalysis.bucketStats.HIGH.attackRate * 100).toFixed(2)),
+              avgExtractionPercent: Number(poolAnalysis.bucketStats.HIGH.avgExtractionPercent.toFixed(3)),
+            },
+          },
+          uniqueSearchers: poolAnalysis.uniqueSearchers,
+          topSearchers: poolAnalysis.topSearchers.map((s) => ({
+            address: s.address,
+            attackCount: s.attackCount,
+            totalExtractedUsd: Number(s.totalExtractedUsd.toFixed(2)),
+          })),
+        }
+      : null
+
     return {
       input: {
         tokenIn: intent.tokenIn,
         tokenOut: intent.tokenOut,
         amountIn: intent.amountIn.toString(),
         chainId: intent.chainId,
+        poolAddress: intent.poolAddress || null,
       },
       simulation: {
         risk: sim.risk,
@@ -64,6 +110,7 @@ export class MEVShieldAgent {
         sandwichGasCostUsd: Number(sim.gasData.sandwichGasCostUsd.toFixed(2)),
         safeChunkThresholdUsd: Number(sim.safeChunkThresholdUsd.toFixed(2)),
       },
+      poolHistory: serializePoolAnalysis,
       tradeSizeUsd: Number(tradeSizeUsd.toFixed(2)),
       execution: {
         strategyType: execution.strategyType,
