@@ -120,9 +120,9 @@ export async function profileChains(
       const gasPrice = await entry.client.getGasPrice()
       const gasPriceGwei = Number(gasPrice) / 1e9
 
-      const sandwichGasWei = SANDWICH_GAS_UNITS * gasPrice
+      const sandwichGasWei = SANDWICH_GAS_UNITS * gasPrice //needs to be more dynamic 
       const sandwichGasCostUsd = (Number(sandwichGasWei) / 1e18) * ethPriceUsd
-
+      console.log(`   ${chainName}: gas=${gasPriceGwei.toFixed(3)} gwei | sandwich cost=$${sandwichGasCostUsd.toFixed(2)}`)
       const swapGasWei = SWAP_GAS_UNITS * gasPrice
       const userSwapGasCostUsd = (Number(swapGasWei) / 1e18) * ethPriceUsd
 

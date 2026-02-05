@@ -2,7 +2,7 @@ import { SandwichSimulation } from "../perception/simulator"
 import { UserPolicy } from "../core/types"
 import { chainClients, getAvailableChains } from "../core/config"
 import { estimateCrossChainCost } from "../actions/lifiRouter"
-import { estimatePrivateRelayCost } from "../actions/privateTx"
+// import { estimatePrivateRelayCost } from "../actions/privateTx"
 
 export interface OptimalRoute {
   totalChunks: number
