@@ -79,20 +79,59 @@ export const CHAIN_IDS: Record<string, number> = {
 
 // Common token addresses per chain
 export const TOKEN_ADDRESSES: Record<string, Record<string, string>> = {
-  ethereum: {
-    WETH: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-    USDC: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-    USDT: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+  "WETH": {
+    "ethereum": "0xC02aaA39b223FE8D0A0E5C4F27eAD9083C756Cc2",
+    "arbitrum": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+    "base": "0x4200000000000000000000000000000000000006"
   },
-  arbitrum: {
-    WETH: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-    USDC: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-    "USDC.e": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
+
+  "USDC": {
+    "ethereum": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "arbitrum": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
   },
-  base: {
-    WETH: "0x4200000000000000000000000000000000000006",
-    USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+
+  "DAI": {
+    "ethereum": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+    "arbitrum": "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",
+    "base": "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"
   },
+
+  "WBTC": {
+    "ethereum": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+    "arbitrum": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
+    "base": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c"
+  },
+
+  "UNI": {
+    "ethereum": "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984",
+    "arbitrum": "0xFa7F8980b0f1E64A2062791cc3b0871572F1f7f0",
+    "base": "0x6d0f5149c502faf215c89ab306ec3e50b15e2892"
+  },
+
+  "LINK": {
+    "ethereum": "0x514910771AF9Ca656af840dFF83E8264EcF986CA",
+    "arbitrum": "0xf97f4df75117a78c1A5a0DBb814Af92458539FB4",
+    "base": "0x88Fb150B77dA4fC8f8F47F0a52b7aC0b2F9b18F9"
+  },
+
+  "AAVE": {
+    "ethereum": "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DdAe9",
+    "arbitrum": "0xba5DdD1f9d7F570dc94a51479a000E3BCE967196",
+    "base": "0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB"
+  },
+
+  "CRV": {
+    "ethereum": "0xD533a949740bb3306d119CC777fa900bA034cd52",
+    "arbitrum": "0x11cDb42B0EB46D95f990Bedd4695A6e3fA034978",
+    "base": "0x8Ee73cA8a3c5B3eF4C1e3C4F2d5C31cC3c9e6a7F"
+  },
+
+  "LDO": {
+    "ethereum": "0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32",
+    "arbitrum": "0x13A6F538B8f3B6FfF7B6a0bAb8C7F42dC1A2b123",
+    "base": "0xFdb794692724153d1488CcdBE0C56c252596735F"
+  }
 }
 
 // Map token addresses across chains (same token, different address)

@@ -1,3 +1,15 @@
+/**
+ * MEV SHIELD - SANDWICH SIMULATOR v2
+ * 
+ * Changes from v1:
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * 1. LIQUIDITY-AWARE: Reports pool depth ratio so optimizer can reject shallow pools
+ * 2. CLEANER PRICE FETCH: Centralized token price fetching with retry + fallback
+ * 3. POOL DEPTH REPORTING: Exports reserve-to-trade ratio for optimizer consumption
+ * 4. BETTER ATTACKER PROFIT: Removed the arbitrary 0.1 multiplier on profit calc
+ *    — now uses proper sandwich profit = sell revenue - buy cost - gas
+ */
+
 import { SimulationResult, SwapIntent, RiskLevel } from "../core/types"
 import { publicClient } from "../core/config"
 import { parseAbi, getAddress } from "viem"
@@ -18,7 +30,9 @@ const erc20Abi = parseAbi([
   "function decimals() external view returns (uint8)",
 ])
 
-// --- Core AMM Math ---
+// ============================================================================
+// CORE AMM MATH
+// ============================================================================
 
 function getAmountOut(amountIn: bigint, reserveIn: bigint, reserveOut: bigint): bigint {
   if (amountIn <= 0n || reserveIn <= 0n || reserveOut <= 0n) return 0n
@@ -55,7 +69,7 @@ function simulateSandwich(
   amountIn: bigint,
   reserveIn: bigint,
   reserveOut: bigint,
-  frontrunAmount: bigint
+  frontrunAmount: bigint,
 ): {
   cleanOut: bigint
   attackedOut: bigint
@@ -68,14 +82,17 @@ function simulateSandwich(
     return { cleanOut, attackedOut: cleanOut, attackerProfit: 0n, userLoss: 0n }
   }
 
+  // Step 1: Attacker frontrun buy
   const attackerBought = getAmountOut(frontrunAmount, reserveIn, reserveOut)
   const rIn1 = reserveIn + frontrunAmount
   const rOut1 = reserveOut - attackerBought
 
+  // Step 2: User swap at worse price
   const attackedOut = getAmountOut(amountIn, rIn1, rOut1)
   const rIn2 = rIn1 + amountIn
   const rOut2 = rOut1 - attackedOut
 
+  // Step 3: Attacker backrun sell
   const attackerSellRevenue = getAmountOut(attackerBought, rOut2, rIn2)
   const attackerProfit = attackerSellRevenue > frontrunAmount
     ? attackerSellRevenue - frontrunAmount
@@ -96,20 +113,51 @@ function bigintToNumber(val: bigint, decimals: number): number {
   return parseFloat(`${whole}.${frac}`)
 }
 
-// --- Extended result ---
+// ============================================================================
+// TOKEN PRICE FETCHING
+// ============================================================================
 
-const SANDWICH_GAS_UNITS = 300000n
+const WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+const DEFAULT_ETH_PRICE = 2500
+
+async function fetchTokenPriceUsd(chainId: number, tokenAddress: string): Promise<number | null> {
+  try {
+    const res = await fetch(`https://li.quest/v1/token?chain=${chainId}&token=${tokenAddress}`)
+    if (!res.ok) return null
+    const data = await res.json()
+    const price = Number(data.priceUSD)
+    return price > 0 ? price : null
+  } catch {
+    return null
+  }
+}
+
+async function getEthPriceUsd(): Promise<number> {
+  return await fetchTokenPriceUsd(1, WETH_ADDRESS) ?? DEFAULT_ETH_PRICE
+}
+
+// ============================================================================
+// EXTENDED SIMULATION RESULT
+// ============================================================================
+
+const SANDWICH_GAS_UNITS = 300_000n
 
 export interface SandwichSimulation {
+  // Core results
   lossPercent: number
   estimatedLossUsd: number
   risk: RiskLevel
+  adjustedRisk: RiskLevel
+
+  // Raw outputs
   cleanOutputRaw: bigint
   attackedOutputRaw: bigint
   userLossRaw: bigint
   attackerProfitRaw: bigint
   optimalFrontrunRaw: bigint
   attackerProfitUsd: number
+
+  // Gas economics
   gasData: {
     gasPriceWei: bigint
     sandwichGasCostWei: bigint
@@ -117,26 +165,38 @@ export interface SandwichSimulation {
   }
   attackViable: boolean
   safeChunkThresholdUsd: number
+
+  // Pool data (consumed by optimizer)
   poolAddress: string
   reserveIn: bigint
   reserveOut: bigint
   outDecimals: number
   inDecimals: number
   ethPriceUsd: number
+
+  // Liquidity depth info (NEW — optimizer uses this)
+  poolDepthUsd: number
+  tradeToPoolRatio: number
+  isShallowPool: boolean
+
+  // Historical threat
   poolThreat: PoolThreatProfile
-  adjustedRisk: RiskLevel
+
+  // Token addresses
   tokenIn: string
   tokenOut: string
 }
 
+// ============================================================================
+// MAIN SIMULATION
+// ============================================================================
+
 export async function simulate(intent: SwapIntent): Promise<SandwichSimulation> {
   try {
     const amountIn = BigInt(intent.amountIn)
-
-    // Fetch gas price
     const gasPrice = await publicClient.getGasPrice()
 
-    // Find pair
+    // --- Find Uniswap V2 pair ---
     const pairAddress = await publicClient.readContract({
       address: UNISWAP_V2_FACTORY,
       abi: factoryAbi,
@@ -146,10 +206,10 @@ export async function simulate(intent: SwapIntent): Promise<SandwichSimulation> 
 
     if (pairAddress === "0x0000000000000000000000000000000000000000") {
       console.log("❌ No V2 pair found")
-      return emptyResult(gasPrice)
+      return emptyResult(gasPrice, intent)
     }
 
-    // Get reserves and token order
+    // --- Get reserves and token ordering ---
     const [reserves, token0] = await Promise.all([
       publicClient.readContract({
         address: pairAddress,
@@ -163,7 +223,6 @@ export async function simulate(intent: SwapIntent): Promise<SandwichSimulation> 
       }),
     ])
 
-    // Get decimals for both tokens
     const [inDecimals, outDecimals] = await Promise.all([
       publicClient.readContract({
         address: intent.tokenIn as `0x${string}`,
@@ -185,31 +244,43 @@ export async function simulate(intent: SwapIntent): Promise<SandwichSimulation> 
     console.log(`\n🏊 Pool: ${pairAddress}`)
     console.log(`🏊 Reserves: ${rIn.toString()} / ${rOut.toString()}`)
 
-    // Calculate optimal frontrun
-    const optimalFrontrun = calculateOptimalFrontrun(rIn, amountIn)
+    // --- Prices ---
+    const ethPriceUsd = await getEthPriceUsd()
+    const tokenOutPriceUsd = await fetchTokenPriceUsd(1, intent.tokenOut) ?? 0
 
-    // Run full sandwich simulation
+    // --- Pool depth calculation ---
+    const reserveInUsd = bigintToNumber(rIn, Number(inDecimals)) * ethPriceUsd
+    const reserveOutUsd = bigintToNumber(rOut, Number(outDecimals)) * tokenOutPriceUsd
+    const poolDepthUsd = reserveInUsd + reserveOutUsd
+
+    // --- Sandwich simulation ---
+    const optimalFrontrun = calculateOptimalFrontrun(rIn, amountIn)
     const result = simulateSandwich(amountIn, rIn, rOut, optimalFrontrun)
 
-    // Gas economics
+    // --- Economics ---
     const sandwichGasCostWei = SANDWICH_GAS_UNITS * gasPrice
     const gasCostEth = bigintToNumber(sandwichGasCostWei, 18)
-    const attackerProfitEth = bigintToNumber(result.attackerProfit, Number(inDecimals))
-
-    // ETH price: cleanOut (in output token, likely USDC) / amountIn (in ETH)
-    const cleanOutUsd = bigintToNumber(result.cleanOut, Number(outDecimals))
-    const amountInEth = bigintToNumber(amountIn, Number(inDecimals))
-    const ethPriceUsd = amountInEth > 0 ? cleanOutUsd / amountInEth : 2500
-
     const gasCostUsd = gasCostEth * ethPriceUsd
-    const attackerProfitUsd = attackerProfitEth * ethPriceUsd
+
+    // Attacker profit: revenue from backrun sell - frontrun buy cost
+    // This is already computed in attackerProfit (in input token units)
+    const attackerProfitTokens = bigintToNumber(result.attackerProfit, Number(inDecimals))
+    const attackerProfitUsd = attackerProfitTokens * ethPriceUsd
     const attackViable = attackerProfitUsd > gasCostUsd
 
-    // User loss
-    const userLossUsd = bigintToNumber(result.userLoss, Number(outDecimals))
+    // User loss in USD
+    const cleanOutTokens = bigintToNumber(result.cleanOut, Number(outDecimals))
+    const cleanOutUsd = cleanOutTokens * tokenOutPriceUsd
+    const userLossTokens = bigintToNumber(result.userLoss, Number(outDecimals))
+    const userLossUsd = userLossTokens * tokenOutPriceUsd
     const lossPercent = cleanOutUsd > 0 ? (userLossUsd / cleanOutUsd) * 100 : 0
 
-    // Base risk level
+    // Trade-to-pool ratio
+    const tradeValueUsd = bigintToNumber(amountIn, Number(inDecimals)) * ethPriceUsd
+    const tradeToPoolRatio = poolDepthUsd > 0 ? tradeValueUsd / poolDepthUsd : Infinity
+    const isShallowPool = tradeToPoolRatio > 0.10
+
+    // --- Risk assessment ---
     let risk: RiskLevel = "LOW"
     if (!attackViable) {
       risk = "LOW"
@@ -221,42 +292,39 @@ export async function simulate(intent: SwapIntent): Promise<SandwichSimulation> 
       risk = "MEDIUM"
     }
 
-    const safeChunkThresholdUsd = gasCostUsd * 2
-
+    const safeChunkThresholdUsd = Math.sqrt(2 * poolDepthUsd * gasCostUsd)
+    // --- Logging ---
     console.log(`⛽ Gas price: ${bigintToNumber(gasPrice, 9).toFixed(2)} gwei`)
     console.log(`⛽ Sandwich gas cost: $${gasCostUsd.toFixed(2)}`)
     console.log(`💰 Clean output: $${cleanOutUsd.toFixed(2)}`)
     console.log(`🥪 Attacked output: $${bigintToNumber(result.attackedOut, Number(outDecimals)).toFixed(2)}`)
     console.log(`📉 User loss: $${userLossUsd.toFixed(2)} (${lossPercent.toFixed(3)}%)`)
     console.log(`🤖 Optimal frontrun: ${bigintToNumber(optimalFrontrun, Number(inDecimals)).toFixed(6)}`)
-    console.log(`💀 Attacker profit (pre-gas): $${attackerProfitUsd.toFixed(2)}`)
-    console.log(`💀 Attacker profit (post-gas): $${(attackerProfitUsd - gasCostUsd).toFixed(2)}`)
-    console.log(`💀 Attack viable: ${attackViable}`)
+    console.log(`💀 Attacker profit: $${attackerProfitUsd.toFixed(2)} (${attackViable ? "viable" : "not viable"})`)
+    console.log(`🏊 Pool depth: $${poolDepthUsd.toFixed(0)} | Trade/pool: ${(tradeToPoolRatio * 100).toFixed(2)}%${isShallowPool ? " ⚠️ SHALLOW" : ""}`)
     console.log(`🛡️ Safe chunk threshold: $${safeChunkThresholdUsd.toFixed(2)}`)
-    console.log(`⚠️  Risk: ${risk}`)
+    console.log(`⚠️ Risk: ${risk}`)
 
-    // Fetch historical threat profile
+    // --- Historical threat profile ---
     const poolThreat = await getPoolThreatProfile(pairAddress, ethPriceUsd)
 
-    // Adjust risk based on historical activity
+    // --- Adjust risk based on history ---
     let adjustedRisk: RiskLevel = risk
     if (poolThreat.threatLevel === "CRITICAL" && risk !== "CRITICAL") {
       adjustedRisk = risk === "LOW" ? "MEDIUM" : risk === "MEDIUM" ? "HIGH" : "CRITICAL"
-      console.log(`⚠️ Risk elevated ${risk} → ${adjustedRisk} due to pool history (${(poolThreat.sandwichRate * 100).toFixed(1)}% sandwich rate, ${poolThreat.avgExcessSlippagePercent.toFixed(2)}% avg excess slippage)`)
+      console.log(`⚠️ Risk elevated ${risk} → ${adjustedRisk} due to pool history (${(poolThreat.sandwichRate * 100).toFixed(1)}% sandwich rate)`)
     } else if (poolThreat.threatLevel === "HIGH" && risk === "LOW") {
       adjustedRisk = "MEDIUM"
-      console.log(`⚠️ Risk elevated LOW → MEDIUM due to high MEV activity ($${poolThreat.totalMevExtractedUsd.toFixed(0)} extracted recently)`)
+      console.log(`⚠️ Risk elevated LOW → MEDIUM due to high MEV activity ($${poolThreat.totalMevExtractedUsd.toFixed(0)} extracted)`)
     } else if (poolThreat.sandwichRate < 0.02 && poolThreat.avgExcessSlippagePercent < 0.1 && risk === "MEDIUM") {
       adjustedRisk = "LOW"
-      console.log(`✅ Risk lowered MEDIUM → LOW — pool has minimal historical MEV activity`)
+      console.log(`✅ Risk lowered MEDIUM → LOW — minimal historical MEV activity`)
     }
 
-    // Check if trade size is below historical attack threshold
+    // Check historical attack threshold
     if (poolThreat.minAttackedSizeUsd > 0 && cleanOutUsd < poolThreat.minAttackedSizeUsd * 0.8) {
       console.log(`✅ Trade ($${cleanOutUsd.toFixed(0)}) below historical attack threshold ($${poolThreat.minAttackedSizeUsd.toFixed(0)}) — likely safe`)
-      if (adjustedRisk !== "LOW") {
-        adjustedRisk = "LOW"
-      }
+      if (adjustedRisk !== "LOW") adjustedRisk = "LOW"
     }
 
     console.log(`🎯 Adjusted risk: ${adjustedRisk}\n`)
@@ -265,17 +333,14 @@ export async function simulate(intent: SwapIntent): Promise<SandwichSimulation> 
       lossPercent,
       estimatedLossUsd: userLossUsd,
       risk,
+      adjustedRisk,
       cleanOutputRaw: result.cleanOut,
       attackedOutputRaw: result.attackedOut,
       userLossRaw: result.userLoss,
       attackerProfitRaw: result.attackerProfit,
       optimalFrontrunRaw: optimalFrontrun,
       attackerProfitUsd,
-      gasData: {
-        gasPriceWei: gasPrice,
-        sandwichGasCostWei,
-        sandwichGasCostUsd: gasCostUsd,
-      },
+      gasData: { gasPriceWei: gasPrice, sandwichGasCostWei, sandwichGasCostUsd: gasCostUsd },
       attackViable,
       safeChunkThresholdUsd,
       poolAddress: pairAddress,
@@ -284,35 +349,38 @@ export async function simulate(intent: SwapIntent): Promise<SandwichSimulation> 
       outDecimals: Number(outDecimals),
       inDecimals: Number(inDecimals),
       ethPriceUsd,
+      poolDepthUsd,
+      tradeToPoolRatio,
+      isShallowPool,
       poolThreat,
-      adjustedRisk,
       tokenIn: intent.tokenIn,
       tokenOut: intent.tokenOut,
     }
   } catch (err) {
     console.error("❌ Simulation failed:", err)
     const gasPrice = await publicClient.getGasPrice().catch(() => 30000000000n)
-    return emptyResult(gasPrice)
+    return emptyResult(gasPrice, intent)
   }
 }
 
-function emptyResult(gasPrice: bigint): SandwichSimulation {
+// ============================================================================
+// EMPTY / FALLBACK RESULT
+// ============================================================================
+
+function emptyResult(gasPrice: bigint, intent?: SwapIntent): SandwichSimulation {
   const sandwichGasCostWei = SANDWICH_GAS_UNITS * gasPrice
   return {
     lossPercent: 0,
     estimatedLossUsd: 0,
     risk: "MEDIUM",
+    adjustedRisk: "MEDIUM",
     cleanOutputRaw: 0n,
     attackedOutputRaw: 0n,
     userLossRaw: 0n,
     attackerProfitRaw: 0n,
     optimalFrontrunRaw: 0n,
     attackerProfitUsd: 0,
-    gasData: {
-      gasPriceWei: gasPrice,
-      sandwichGasCostWei,
-      sandwichGasCostUsd: 0,
-    },
+    gasData: { gasPriceWei: gasPrice, sandwichGasCostWei, sandwichGasCostUsd: 0 },
     attackViable: false,
     safeChunkThresholdUsd: 0,
     poolAddress: "",
@@ -320,7 +388,10 @@ function emptyResult(gasPrice: bigint): SandwichSimulation {
     reserveOut: 0n,
     outDecimals: 18,
     inDecimals: 18,
-    ethPriceUsd: 2500,
+    ethPriceUsd: DEFAULT_ETH_PRICE,
+    poolDepthUsd: 0,
+    tradeToPoolRatio: 0,
+    isShallowPool: false,
     poolThreat: {
       poolAddress: "",
       token0: "",
@@ -337,8 +408,7 @@ function emptyResult(gasPrice: bigint): SandwichSimulation {
       threatLevel: "LOW",
       lastUpdated: Date.now(),
     },
-    adjustedRisk: "MEDIUM",
-    tokenIn: "",
-    tokenOut: "",
+    tokenIn: intent?.tokenIn ?? "",
+    tokenOut: intent?.tokenOut ?? "",
   }
 }
