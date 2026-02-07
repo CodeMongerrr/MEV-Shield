@@ -1,10 +1,10 @@
 import express from "express"
 import { MEVShieldAgent } from "../core/agent"
 import { registerPoolThreatRoute } from "./poolThreatRoute"
-registerPoolThreatRoute(app)
 export async function startServer() {
   const app = express()
-  
+  registerPoolThreatRoute(app)
+
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Headers", "*")
