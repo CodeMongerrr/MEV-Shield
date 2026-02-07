@@ -1,6 +1,9 @@
 /**
  * MEV SHIELD AGENT v2
  * Main entry point that orchestrates simulation, decision, and execution.
+ * 
+ * CHANGES: Enhanced API response with full optimizer data, market data,
+ * and strategy comparison details.
  */
 
 import { SwapIntent } from "./types"
@@ -34,7 +37,7 @@ export class MEVShieldAgent {
     // 4. Execute strategy
     const execution = await execute(strategy, intent, sim)
 
-    // 5. Serialize response
+    // 5. Serialize response — ENHANCED
     const serializeChunks = execution.splitResult?.chunks.map((c) => ({
       index: c.index,
       sizePercent: c.sizePercent,
@@ -99,6 +102,47 @@ export class MEVShieldAgent {
     }
     console.log("═".repeat(70) + "\n")
 
+    // ── Build the enhanced comparison from the optimizer data stored on the strategy ──
+    let comparison: any = null
+    if ((strategy as any).plan?.costBreakdown || execution.optimizationStats) {
+      // The optimizer plan is on the strategy object for SPLIT/FULL_SHIELD
+      const plan = (strategy as any).plan
+      if (plan) {
+        comparison = {
+          directSwap: {
+            mevLoss: sim.estimatedLossUsd,
+            gasCost: Number((sim.gasData.gasPriceWei * 180000n).toString()) / 1e18 * sim.ethPriceUsd,
+            totalCost: sim.estimatedLossUsd + Number((sim.gasData.gasPriceWei * 180000n).toString()) / 1e18 * sim.ethPriceUsd,
+          },
+          privateRelay: serializePrivateTx ? {
+            mevLoss: 0,
+            gasCost: serializePrivateTx.economics.gasCostUsd,
+            privateTip: serializePrivateTx.economics.priorityFeeUsd,
+            totalCost: serializePrivateTx.economics.gasCostUsd + serializePrivateTx.economics.priorityFeeUsd,
+          } : null,
+          optimizedPath: {
+            mevLoss: plan.costBreakdown.totalMevExposure,
+            gasCost: plan.costBreakdown.totalUserGas,
+            bridgeCost: plan.costBreakdown.totalBridgeFees,
+            privateRelayCost: 0,
+            timingRisk: 0,
+            totalCost: plan.costBreakdown.totalCost,
+            description: plan.reasoning,
+          },
+          winner: execution.strategyType === "DIRECT" ? "DIRECT_SWAP" :
+                  execution.strategyType === "PRIVATE" ? "PRIVATE_RELAY" : "OPTIMIZED_PATH",
+          recommendation: plan.reasoning,
+        }
+      }
+    }
+
+    // ── Try to extract detailed comparison from the optimizer result ──
+    // The optimizer's OptimizedPlan has a .comparison field — we need to
+    // thread it through. The decision engine's `optimize()` call returns it.
+    // We'll attach it from the strategy if available.
+    const optimizerComparison = (strategy as any)._optimizerResult?.comparison ?? null
+    const optimizerCosts = (strategy as any)._optimizerResult?.costs ?? null
+
     return {
       input: {
         tokenIn: intent.tokenIn,
@@ -113,19 +157,43 @@ export class MEVShieldAgent {
         estimatedLossUsd: Number(sim.estimatedLossUsd.toFixed(2)),
         attackViable: sim.attackViable,
         attackerProfitUsd: Number(sim.attackerProfitUsd.toFixed(2)),
-        sandwichGasCostUsd: Number(sim.gasData.sandwichGasCostUsd.toFixed(2)),
+        sandwichGasCostUsd: Number(sim.gasData.sandwichGasCostUsd.toFixed(4)),
         safeChunkThresholdUsd: Number(sim.safeChunkThresholdUsd.toFixed(2)),
+        optimalFrontrunEth: Number(sim.optimalFrontrunRaw.toString()) / 1e18,
+        cleanOutputUsd: Number(
+          (Number(sim.cleanOutputRaw) / 10 ** sim.outDecimals).toFixed(2)
+        ),
+        attackedOutputUsd: Number(
+          (Number(sim.attackedOutputRaw) / 10 ** sim.outDecimals).toFixed(2)
+        ),
+        poolAddress: sim.poolAddress,
+        poolDepthUsd: Number(sim.poolDepthUsd.toFixed(2)),
+        tradeToPoolRatio: Number((sim.tradeToPoolRatio * 100).toFixed(4)),
+        isShallowPool: sim.isShallowPool,
+        ethPriceUsd: Number(sim.ethPriceUsd.toFixed(2)),
+        gasData: {
+          gasPriceGwei: Number((Number(sim.gasData.gasPriceWei) / 1e9).toFixed(4)),
+          sandwichGasCostUsd: Number(sim.gasData.sandwichGasCostUsd.toFixed(4)),
+        },
         poolThreat: {
           sandwichRate: sim.poolThreat.sandwichRate,
           avgExcessSlippage: sim.poolThreat.avgExcessSlippagePercent,
           totalMevExtracted: sim.poolThreat.totalMevExtractedUsd,
+          analyzedSwaps: sim.poolThreat.analyzedSwaps,
+          sandwichCount: sim.poolThreat.sandwichCount,
+          minAttackedSizeUsd: sim.poolThreat.minAttackedSizeUsd,
+          maxAttackedSizeUsd: sim.poolThreat.maxAttackedSizeUsd,
+          threatLevel: sim.poolThreat.threatLevel,
         },
+        mevTemperature: null as any, // Will be populated if available
       },
       tradeSizeUsd: Number(tradeSizeUsd.toFixed(2)),
       execution: {
         strategyType: execution.strategyType,
         reasoning: execution.reasoning,
         optimizationStats: execution.optimizationStats || null,
+        comparison: optimizerComparison ?? comparison ?? null,
+        costs: optimizerCosts ?? null,
         split: serializeChunks
           ? {
               chunks: serializeChunks,

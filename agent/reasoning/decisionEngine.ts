@@ -1,9 +1,12 @@
 /**
  * DECISION ENGINE v3
  * 
- * Works with calcOptimizer v3 to make optimal strategy decisions.
+ * Works with calcOptimizer v4 to make optimal strategy decisions.
  * The optimizer now does most of the heavy lifting - this engine
  * primarily translates the optimizer's output into execution strategies.
+ * 
+ * CHANGES: Attaches _optimizerResult to strategy so agent.ts can
+ * include comparison/costs in the API response.
  */
 
 import { UserPolicy } from "../core/types"
@@ -13,11 +16,11 @@ import { optimize, OptimizedPlan, toChunkPlan, ChunkPlan } from "./calcOptimizer
 export type { ChunkPlan } from "./calcOptimizer"
 
 export type Strategy =
-  | { type: "DIRECT"; reasoning: string }
-  | { type: "MEV_ROUTE"; reasoning: string }
-  | { type: "SPLIT"; plan: ChunkPlan; reasoning: string }
-  | { type: "PRIVATE"; reasoning: string }
-  | { type: "FULL_SHIELD"; plan: ChunkPlan; reasoning: string }
+  | { type: "DIRECT"; reasoning: string; _optimizerResult?: OptimizedPlan }
+  | { type: "MEV_ROUTE"; reasoning: string; _optimizerResult?: OptimizedPlan }
+  | { type: "SPLIT"; plan: ChunkPlan; reasoning: string; _optimizerResult?: OptimizedPlan }
+  | { type: "PRIVATE"; reasoning: string; _optimizerResult?: OptimizedPlan }
+  | { type: "FULL_SHIELD"; plan: ChunkPlan; reasoning: string; _optimizerResult?: OptimizedPlan }
 
 export async function decide(
   sim: SandwichSimulation,
@@ -71,21 +74,19 @@ export async function decide(
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   
   switch (optimized.comparison.winner) {
-    case "SINGLE_PUBLIC": {
-      // Trade is safe enough to go public
+    case "DIRECT_SWAP": {
       const reasoning = `Optimizer: ${optimized.comparison.recommendation}`
       console.log(`\n   ✅ DIRECT: ${reasoning}`)
-      return { type: "DIRECT", reasoning }
+      return { type: "DIRECT", reasoning, _optimizerResult: optimized }
     }
 
-    case "SINGLE_PRIVATE": {
-      // Private relay is most economical
+    case "PRIVATE_RELAY": {
       const reasoning = `Optimizer: ${optimized.comparison.recommendation}`
       console.log(`\n   ✅ PRIVATE: ${reasoning}`)
-      return { type: "PRIVATE", reasoning }
+      return { type: "PRIVATE", reasoning, _optimizerResult: optimized }
     }
 
-    case "CHUNKING": {
+    case "OPTIMIZED_PATH": {
       const plan = toChunkPlan(optimized)
       
       // Check if any chunks are unsafe (critical risk)
@@ -94,7 +95,7 @@ export async function decide(
         if (unsafeChunks.length > 0) {
           const reasoning = `Critical risk. ${plan.count} chunks, ${unsafeChunks.length} unsafe → add private relay for unsafe chunks.`
           console.log(`\n   ✅ FULL_SHIELD: ${reasoning}`)
-          return { type: "FULL_SHIELD", plan, reasoning }
+          return { type: "FULL_SHIELD", plan, reasoning, _optimizerResult: optimized }
         }
       }
 
@@ -106,14 +107,14 @@ export async function decide(
         `${safeCount}/${plan.count} safe. Saves $${plan.costBreakdown.savings.toFixed(2)} (${plan.costBreakdown.savingsPercent.toFixed(1)}%).`
       
       console.log(`\n   ✅ SPLIT: ${reasoning}`)
-      return { type: "SPLIT", plan, reasoning }
+      return { type: "SPLIT", plan, reasoning, _optimizerResult: optimized }
     }
 
     default: {
       // Fallback
       const reasoning = `Fallback to direct. Winner: ${optimized.comparison.winner}`
       console.log(`\n   ⚠️ DIRECT (fallback): ${reasoning}`)
-      return { type: "DIRECT", reasoning }
+      return { type: "DIRECT", reasoning, _optimizerResult: optimized }
     }
   }
 }
