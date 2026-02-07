@@ -515,8 +515,8 @@ async function calculatePrivateRelayCost(
     ? searcherBidUsd * INCLUSION_PREMIUM
     : 0  // no competing bundle → no auction pressure
 
-  const estimatedTipUsd = Math.max(requiredPaymentUsd, MIN_PRIVATE_TIP_USD)
-  const totalCostUsd = baseGasCostUsd + estimatedTipUsd
+  const estimatedTipUsd = Math.max(requiredPaymentUsd, MIN_PRIVATE_TIP_USD) *0.1
+  const totalCostUsd = baseGasCostUsd + estimatedTipUsd 
 
   // ── Logging ────────────────────────────────────────────────────────────
   logger.log(`  Pool depth:       $${poolDepthUsd.toFixed(0)} (reserveIn ≈ $${reserveInUsd.toFixed(0)})`)
