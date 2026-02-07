@@ -4,7 +4,7 @@
  */
 
 import { SwapIntent } from "./types"
-import { simulate } from "../perception/simulator"
+import { analyzePool, MEVSimulationResult } from "../perception/mevTemperature"
 import { fetchUserPolicy } from "../perception/ens"
 import { decide } from "../reasoning/decisionEngine"
 import { execute } from "../actions/executor"
@@ -22,7 +22,12 @@ export class MEVShieldAgent {
     console.log(`   Policy: ${policy.riskProfile}, threshold=$${policy.privateThresholdUsd}`)
 
     // 2. Simulate MEV exposure
-    const sim = await simulate(intent)
+    const sim = await analyzePool(
+      intent.tokenIn,
+      intent.tokenOut,
+      intent.amountIn.toString(),
+      process.env.GRAPH_API_KEY || ""
+    )
 
     const tradeSizeUsd = sim.cleanOutputRaw > 0n
       ? Number(sim.cleanOutputRaw) / 10 ** sim.outDecimals
@@ -108,17 +113,20 @@ export class MEVShieldAgent {
       },
       simulation: {
         risk: sim.risk,
-        adjustedRisk: sim.adjustedRisk,
+        adjustedRisk: sim.risk,  // temperature-based; no separate adjustment needed
         estimatedLossPercent: Number(sim.lossPercent.toFixed(3)),
         estimatedLossUsd: Number(sim.estimatedLossUsd.toFixed(2)),
         attackViable: sim.attackViable,
         attackerProfitUsd: Number(sim.attackerProfitUsd.toFixed(2)),
         sandwichGasCostUsd: Number(sim.gasData.sandwichGasCostUsd.toFixed(2)),
         safeChunkThresholdUsd: Number(sim.safeChunkThresholdUsd.toFixed(2)),
-        poolThreat: {
-          sandwichRate: sim.poolThreat.sandwichRate,
-          avgExcessSlippage: sim.poolThreat.avgExcessSlippagePercent,
-          totalMevExtracted: sim.poolThreat.totalMevExtractedUsd,
+        mevTemperature: {
+          score: sim.mevProfile.metrics.score,
+          riskLevel: sim.mevProfile.metrics.riskLevel,
+          victimRate: sim.mevProfile.metrics.victimRate,
+          sandwichCount: sim.mevProfile.metrics.sandwichCount,
+          totalLossUsd: sim.mevProfile.metrics.totalLossUsd,
+          costMultiplier: sim.mevProfile.metrics.mevCostMultiplier,
         },
       },
       tradeSizeUsd: Number(tradeSizeUsd.toFixed(2)),

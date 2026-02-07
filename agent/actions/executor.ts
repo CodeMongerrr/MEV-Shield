@@ -5,7 +5,7 @@
 
 import { Strategy, ChunkPlan } from "../reasoning/decisionEngine"
 import { SwapIntent } from "../core/types"
-import { SandwichSimulation } from "../perception/simulator"
+import { MEVSimulationResult } from "../perception/mevTemperature"
 import { buildSplitPlan, SplitResult } from "./splitter"
 import { buildPrivateTx, PrivateTxPlan } from "./privateTx"
 import { optimizeChunks } from "../reasoning/calcOptimizer"
@@ -25,7 +25,7 @@ export interface ExecutionResult {
 export async function execute(
   strategy: Strategy,
   intent: SwapIntent,
-  sim: SandwichSimulation
+  sim: MEVSimulationResult,
 ): Promise<ExecutionResult> {
   console.log(`\n⚙️ EXECUTING: ${strategy.type}`)
   console.log(`📋 ${strategy.reasoning}`)

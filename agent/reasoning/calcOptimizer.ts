@@ -1,3 +1,4 @@
+
 /**
  * MEV SHIELD - HYBRID CHUNK OPTIMIZER v4
  * 
@@ -33,11 +34,10 @@
  *   C_total = C_private(amount_private) + Σ_i C_public(chunk_i) + BridgeCosts
  */
 
-import { SandwichSimulation } from "../perception/simulator"
+import { MEVSimulationResult, PoolMEVProfile } from "../perception/mevTemperature"
 import { UserPolicy } from "../core/types"
 import { chainClients, getAvailableChains, publicClient } from "../core/config"
 import { getLiFiQuote, CHAIN_IDS, getTokenOnChain } from "../actions/lifiRouter"
-import { fetchPoolMEVProfile, PoolMEVProfile } from "../perception/mevTemperature"
 
 // ============================================================================
 // TYPES
@@ -543,11 +543,9 @@ async function calculatePrivateRelayCost(
 }
 
 async function fetchLiveMarketData(
-  sim: SandwichSimulation,
+  sim: MEVSimulationResult,
   tradeSizeUsd: number,
   logger: Logger,
-  poolAddress?: string,
-  graphApiKey?: string,
 ): Promise<LiveMarketData> {
   logger.section("FETCHING LIVE MARKET DATA")
 
@@ -626,21 +624,17 @@ async function fetchLiveMarketData(
     }
   }
 
-  // --- MEV profile ---
-  let mevProfile: PoolMEVProfile | undefined
-  if (poolAddress && graphApiKey) {
-    logger.subsection("MEV Temperature Profile")
-    try {
-      mevProfile = await fetchPoolMEVProfile(poolAddress, graphApiKey)
-      logger.log(
-        `  Score: ${mevProfile.metrics.score}/100 (${mevProfile.metrics.riskLevel}) | ` +
-        `Safe: $${mevProfile.metrics.safeThresholdUsd.toFixed(2)} | ` +
-        `Multiplier: ${mevProfile.metrics.mevCostMultiplier.toFixed(2)}x`
-      )
-    } catch {
-      logger.log(`  ⚠️ MEV profile fetch failed, using defaults`)
-    }
+  // --- MEV profile (already computed in analyzePool) ---
+  const mevProfile = sim.mevProfile
+  if (mevProfile) {
+    logger.log("MEV Temperature Profile")
+    logger.log(
+      `  Score: ${mevProfile.metrics.score}/100 (${mevProfile.metrics.riskLevel}) | ` +
+      `Safe: $${mevProfile.metrics.safeThresholdUsd.toFixed(2)} | ` +
+      `Multiplier: ${mevProfile.metrics.mevCostMultiplier.toFixed(2)}x`
+    )
   }
+
 
   // --- Private relay ---
   logger.subsection("Private Relay Cost (AMM-Derived Block Auction)")
@@ -963,11 +957,10 @@ function evalPrivateRelay(marketData: LiveMarketData): SingleResult {
 // ============================================================================
 
 export async function optimize(
-  sim: SandwichSimulation,
+  sim: MEVSimulationResult,
   policy: UserPolicy,
   tradeSizeUsd: number,
-  poolAddress?: string,
-  graphApiKey?: string,
+  
 ): Promise<OptimizedPlan> {
   const logger = new Logger()
 
@@ -986,7 +979,7 @@ export async function optimize(
   logger.log(`  Max chunks: ${maxChunks} (trade ${tradeSizeUsd >= WHALE_THRESHOLD_USD ? "≥" : "<"} $1M)`)
 
   // --- Fetch market data ---
-  const marketData = await fetchLiveMarketData(sim, tradeSizeUsd, logger, poolAddress, graphApiKey)
+  const marketData = await fetchLiveMarketData(sim, tradeSizeUsd, logger)
 
   const ethChain = marketData.chains.find(c => c.chain === "ethereum" && c.available)
   if (!ethChain) {
@@ -1416,9 +1409,10 @@ export function toChunkPlan(opt: OptimizedPlan): ChunkPlan {
 }
 
 export async function optimizeChunks(
-  sim: SandwichSimulation,
+  sim: MEVSimulationResult,
   policy: UserPolicy,
   tradeSizeUsd: number,
 ): Promise<ChunkPlan> {
+    console.log("Simulating with:", sim)
   return toChunkPlan(await optimize(sim, policy, tradeSizeUsd))
 }

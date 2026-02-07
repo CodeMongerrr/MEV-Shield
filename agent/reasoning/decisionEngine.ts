@@ -7,7 +7,7 @@
  */
 
 import { UserPolicy } from "../core/types"
-import { SandwichSimulation } from "../perception/simulator"
+import { MEVSimulationResult } from "../perception/mevTemperature"
 import { optimize, OptimizedPlan, toChunkPlan, ChunkPlan } from "./calcOptimizer"
 
 export type { ChunkPlan } from "./calcOptimizer"
@@ -20,11 +20,11 @@ export type Strategy =
   | { type: "FULL_SHIELD"; plan: ChunkPlan; reasoning: string }
 
 export async function decide(
-  sim: SandwichSimulation,
+  sim: MEVSimulationResult,
   policy: UserPolicy,
   tradeSizeUsd: number
 ): Promise<Strategy> {
-  const risk = sim.adjustedRisk
+  const risk = sim.risk
 
   console.log(`\n🧠 DECISION ENGINE v3`)
   console.log(`═══════════════════════════════════════════════════════════`)
@@ -46,7 +46,7 @@ export async function decide(
   // FAST EXIT 2: Low risk pool
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   if (risk === "LOW") {
-    const reasoning = `Low risk. Pool sandwich rate: ${(sim.poolThreat.sandwichRate * 100).toFixed(1)}%.`
+    const reasoning = `Low risk. Pool sandwich rate: ${(sim.mevProfile.metrics.score * 100).toFixed(1)}%.`
     console.log(`\n   ✅ DIRECT: ${reasoning}`)
     return { type: "DIRECT", reasoning }
   }
@@ -71,21 +71,21 @@ export async function decide(
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   
   switch (optimized.comparison.winner) {
-    case "SINGLE_PUBLIC": {
+    case "DIRECT_SWAP": {
       // Trade is safe enough to go public
       const reasoning = `Optimizer: ${optimized.comparison.recommendation}`
       console.log(`\n   ✅ DIRECT: ${reasoning}`)
       return { type: "DIRECT", reasoning }
     }
 
-    case "SINGLE_PRIVATE": {
+    case "PRIVATE_RELAY": {
       // Private relay is most economical
       const reasoning = `Optimizer: ${optimized.comparison.recommendation}`
       console.log(`\n   ✅ PRIVATE: ${reasoning}`)
       return { type: "PRIVATE", reasoning }
     }
 
-    case "CHUNKING": {
+    case "OPTIMIZED_PATH": {
       const plan = toChunkPlan(optimized)
       
       // Check if any chunks are unsafe (critical risk)
