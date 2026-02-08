@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { useEnsResolver } from "./hooks/useEnsResolver";
 
 // ── API Config ──────────────────────────────────────────────────────────────
 const API_BASE = "http://localhost:3001";
@@ -8,7 +9,7 @@ const TOKENS = {
   WETH: { address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", symbol: "WETH", decimals: 18 },
   USDT: { address: "0xdAC17F958D2ee523a2206206994597C13D831ec7", symbol: "USDT", decimals: 6 },
   USDC: { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", symbol: "USDC", decimals: 6 },
-  DAI:  { address: "0x6B175474E89094C44Da98b954EedeAC495271d0F", symbol: "DAI",  decimals: 18 },
+  DAI: { address: "0x6B175474E89094C44Da98b954EedeAC495271d0F", symbol: "DAI", decimals: 18 },
   WBTC: { address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", symbol: "WBTC", decimals: 8 },
 };
 const TOKEN_LIST = Object.values(TOKENS);
@@ -138,7 +139,6 @@ function ProgressBar({ value, max, color, height = 4 }) {
 // ── Main ────────────────────────────────────────────────────────────────────
 export default function App() {
   // Form
-  const [user, setUser] = useState("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
   const [tokenIn, setTokenIn] = useState(TOKENS.WETH.address);
   const [tokenOut, setTokenOut] = useState(TOKENS.USDT.address);
   const [amountRaw, setAmountRaw] = useState("30");
@@ -153,7 +153,44 @@ export default function App() {
   const [poolThreat, setPoolThreat] = useState(null);
   const [poolThreatLoading, setPoolThreatLoading] = useState(false);
   const logRef = useRef(null);
+  // State
+  const [userInput, setUserInput] = useState("vitalik.eth");
+  const [resolvedUser, setResolvedUser] = useState(null);
+  const [ensName, setEnsName] = useState(null);
+  const [ensPolicy, setEnsPolicy] = useState(null);
+  const [resolving, setResolving] = useState(false);
 
+  // Resolve ENS when user types
+  useEffect(() => {
+    if (!userInput || userInput.length < 3) {
+      setResolvedUser(null);
+      setEnsName(null);
+      setEnsPolicy(null);
+      return;
+    }
+
+    const timeout = setTimeout(async () => {
+      setResolving(true);
+      try {
+        const res = await fetch(`${API_BASE}/resolve?input=${encodeURIComponent(userInput)}`);
+        const data = await res.json();
+        setResolvedUser(data.address);
+        setEnsName(data.ensName);
+
+        // Fetch policy if we have an address
+        if (data.address) {
+          const pRes = await fetch(`${API_BASE}/policy?address=${data.address}`);
+          const pData = await pRes.json();
+          setEnsPolicy(pData);
+        }
+      } catch {
+        setResolvedUser(null);
+      }
+      setResolving(false);
+    }, 500); // debounce
+
+    return () => clearTimeout(timeout);
+  }, [userInput]);
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [logs]);
 
   function getAmountIn() {
@@ -172,7 +209,16 @@ export default function App() {
     setLoading(true); setError(null); setResult(null); setLogs([]); setPoolThreat(null);
     const t0 = Date.now();
     const amount = getAmountIn();
-    const payload = { user, tokenIn, tokenOut, amountIn: amount.toString(), chainId };
+    const effectiveUser = resolvedUser || userInput ;
+
+    const payload = {
+      user: effectiveUser,
+      tokenIn,
+      tokenOut,
+      amountIn: amount.toString(),
+      chainId,
+      ensName,
+    };
     setLogs((l) => [...l, `POST /swap`, JSON.stringify(payload, null, 2)]);
     try {
       const res = await fetch(`${API_BASE}/swap`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -210,7 +256,7 @@ export default function App() {
   const winnerLabel = comp?.winner === "OPTIMIZED_PATH"
     ? (comp?.optimizedPath?.description || "Optimized")
     : comp?.winner === "PRIVATE_RELAY" ? "Private Relay"
-    : comp?.winner === "DIRECT_SWAP" ? "Direct Swap" : exec?.strategyType || "—";
+      : comp?.winner === "DIRECT_SWAP" ? "Direct Swap" : exec?.strategyType || "—";
 
   return (
     <div style={{ height: "100vh", background: C.bg, color: C.text, display: "flex", flexDirection: "column", fontFamily: "'JetBrains Mono', 'SF Mono', monospace", fontSize: 12 }}>
@@ -229,14 +275,26 @@ export default function App() {
         </div>
       </header>
 
-      <div style={{ display: "flex", flex: 1, minHeight: 0}}>
+      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         {/* ── Left Panel: Swap Form ──────── */}
         <aside style={{ width: 300, borderRight: `1px solid ${C.border}`, padding: 16, flexShrink: 0, display: "flex", flexDirection: "column" }}>
           <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12, flex: 1 }}>
             <div style={{ fontSize: 9, color: C.textDim, textTransform: "uppercase", letterSpacing: "0.1em" }}>Swap Parameters</div>
+            {/* User input with ENS resolution */}
 
             <Field label="User Address">
-              <Input value={user} onChange={(e) => setUser(e.target.value)} placeholder="0x..." />
+              <Input value={userInput} onChange={(e) => setUserInput(e.target.value)} placeholder="0x... or name.eth" />
+              {resolving && <span style={{ position: "absolute", right: 10, top: 8, fontSize: 11, color: C.textDim }}>Resolving...</span>}
+              {ensName && resolvedUser && (
+                <div style={{ fontSize: 11, color: C.accent, marginTop: 4 }}>
+                  ✓ {ensName} → {resolvedUser.slice(0, 6)}...{resolvedUser.slice(-4)}
+                  {ensPolicy?.riskProfile && (
+                    <span style={{ marginLeft: 8, color: C.textDim }}>
+                      Policy: {ensPolicy.riskProfile} | threshold: ${ensPolicy.privateThresholdUsd}
+                    </span>
+                  )}
+                </div>
+              )}
             </Field>
             <Field label="Token In">
               <Select value={tokenIn} onChange={(e) => setTokenIn(e.target.value)}>
@@ -261,12 +319,23 @@ export default function App() {
               </Select>
             </Field>
 
-            <button type="submit" disabled={loading} style={{
-              marginTop: 6, padding: "10px 0", background: loading ? C.border : C.accent, color: C.bg,
-              border: "none", borderRadius: 4, fontFamily: "inherit", fontSize: 12, fontWeight: 700,
-              cursor: loading ? "wait" : "pointer", letterSpacing: "0.02em", transition: "all 0.15s",
-            }}>
-              {loading ? "Analyzing…" : "Analyze Swap"}
+            <button
+              type="submit"
+              disabled={loading || resolving || (userInput && !resolvedUser)}
+              style={{
+                marginTop: 6,
+                padding: "10px 0",
+                background: (loading || resolving) ? C.border : C.accent,
+                color: C.bg,
+                border: "none",
+                borderRadius: 4,
+                fontFamily: "inherit",
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: (loading || resolving) ? "wait" : "pointer",
+              }}
+            >
+              {resolving ? "Resolving ENS…" : loading ? "Analyzing…" : "Analyze Swap"}
             </button>
 
             {error && <div style={{ padding: 8, background: C.dangerDim, border: `1px solid ${C.danger}33`, borderRadius: 4, fontSize: 11, color: C.danger, wordBreak: "break-all" }}>{error}</div>}
@@ -322,7 +391,27 @@ export default function App() {
                   {costs && <KV label="Savings" value={`${pct(costs.savingsPercent, 1)}`} accent={C.accent} sub={`${fmt(costs.savings)}`} />}
                 </div>
               </div>
-
+              {/* ══ ENS IDENTITY & POLICY SOURCE ════════════════════════════ */}
+{result?.identity?.ensName && (
+  <div style={{
+    display: "flex", alignItems: "center", gap: 10,
+    padding: "8px 14px", background: C.surface,
+    border: `1px solid ${C.border}`, borderRadius: 6,
+  }}>
+    {result.identity.avatar && (
+      <img src={result.identity.avatar} alt="" style={{ width: 24, height: 24, borderRadius: "50%" }} />
+    )}
+    <div>
+      <span style={{ fontSize: 12, color: C.accent, fontWeight: 600 }}>{result.identity.ensName}</span>
+      <span style={{ fontSize: 9, color: C.textDim, marginLeft: 8 }}>
+        Policy: {result.identity.policySource === "ens" ? "📡 loaded from ENS" : "⚙️ defaults"}
+      </span>
+    </div>
+    <div style={{ marginLeft: "auto", fontSize: 9, color: C.textDim, fontFamily: "'JetBrains Mono'" }}>
+      {result.identity.address?.slice(0, 8)}…{result.identity.address?.slice(-6)}
+    </div>
+  </div>
+)}
               {/* ══ 2. RISK OVERVIEW ══════════════════════════════════════════ */}
               <SectionCard title="Risk Overview" icon="⚠️" badge={<Badge level={sim?.adjustedRisk || sim?.risk} />}>
                 <Grid cols={5}>
@@ -333,6 +422,26 @@ export default function App() {
                   <KV label="ETH Price" value={fmt(sim?.ethPriceUsd)} />
                 </Grid>
               </SectionCard>
+
+              {/* ══ USER POLICY (from ENS) ════════════════════════════════ */}
+{result?.policy && (
+  <SectionCard title="User Policy" icon="🔑" badge={
+    <span style={{ fontSize: 10, color: result.identity?.policySource === "ens" ? C.accent : C.textDim, fontWeight: 400, marginLeft: 6 }}>
+      {result.identity?.policySource === "ens" ? "📡 ENS" : "⚙️ Defaults"}
+    </span>
+  }>
+    <Grid cols={5}>
+      <KV label="Risk Profile" value={result.policy.riskProfile} accent={
+        result.policy.riskProfile === "conservative" ? C.accent :
+        result.policy.riskProfile === "aggressive" ? C.warn : C.text
+      } />
+      <KV label="Private Threshold" value={fmt(result.policy.privateThresholdUsd)} />
+      <KV label="Split Enabled" value={result.policy.splitEnabled ? "YES" : "NO"} accent={result.policy.splitEnabled ? C.accent : C.textDim} />
+      <KV label="Max Chunks" value={result.policy.maxChunks ?? "—"} />
+      <KV label="Slippage Tolerance" value={`${result.policy.slippageTolerance ?? 50} bps`} />
+    </Grid>
+  </SectionCard>
+)}
 
               {/* ══ 3. SANDWICH SIMULATION ════════════════════════════════════ */}
               <SectionCard title="Sandwich Simulation" icon="🥪" accent={sim?.attackViable ? C.danger : C.accent}>
