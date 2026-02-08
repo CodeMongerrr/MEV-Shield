@@ -17,7 +17,39 @@ import { Router, Request, Response } from "express"
 import { analyzePoolThreat, PoolThreatResponse } from "../perception/poolThreatAnalyzer"
 
 const router = Router()
+router.use((req, res, next) => {
+  const origin = req.headers.origin || "*"
 
+  // allow origin
+  res.setHeader("Access-Control-Allow-Origin", origin)
+
+  // important for caching proxies
+  res.setHeader("Vary", "Origin")
+
+  // allow methods
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+  )
+
+  // CRITICAL: reflect requested headers
+  const reqHeaders = req.headers["access-control-request-headers"]
+  if (reqHeaders) {
+    res.setHeader("Access-Control-Allow-Headers", reqHeaders)
+  } else {
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
+  }
+
+  // preflight cache (reduces spam OPTIONS)
+  res.setHeader("Access-Control-Max-Age", "86400")
+
+  // preflight response
+  if (req.method === "OPTIONS") {
+    return res.status(204).end()
+  }
+
+  next()
+})
 // Simple in-memory cache (pool → { data, timestamp })
 const cache = new Map<string, { data: PoolThreatResponse; ts: number }>()
 const CACHE_TTL_MS = 5 * 60 * 1000 // 5 minutes
@@ -57,7 +89,9 @@ async function handleAnalysis(pool: string, res: Response) {
 
 export default router
 
+
 /** Helper to register on an existing Express app */
 export function registerPoolThreatRoute(app: any): void {
   app.use(router)
+  
 }

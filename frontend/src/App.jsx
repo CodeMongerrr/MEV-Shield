@@ -150,6 +150,8 @@ export default function App() {
   const [error, setError] = useState(null);
   const [elapsed, setElapsed] = useState(null);
   const [logs, setLogs] = useState([]);
+  const [poolThreat, setPoolThreat] = useState(null);
+  const [poolThreatLoading, setPoolThreatLoading] = useState(false);
   const logRef = useRef(null);
 
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [logs]);
@@ -167,7 +169,7 @@ export default function App() {
 
   async function handleSubmit(e) {
     e.preventDefault();
-    setLoading(true); setError(null); setResult(null); setLogs([]);
+    setLoading(true); setError(null); setResult(null); setLogs([]); setPoolThreat(null);
     const t0 = Date.now();
     const amount = getAmountIn();
     const payload = { user, tokenIn, tokenOut, amountIn: amount.toString(), chainId };
@@ -176,10 +178,21 @@ export default function App() {
       const res = await fetch(`${API_BASE}/swap`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
       const data = await res.json();
-      const mev = await 
       setResult(data);
       setElapsed(((Date.now() - t0) / 1000).toFixed(1));
       setLogs((l) => [...l, `✓ ${((Date.now() - t0) / 1000).toFixed(1)}s`]);
+
+      // Fetch pool threat from separate endpoint
+      const poolAddr = data?.simulation?.poolAddress;
+      if (poolAddr) {
+        setPoolThreatLoading(true);
+        setLogs((l) => [...l, `GET /pool-threat?pool=${poolAddr}`]);
+        fetch(`${API_BASE}/pool-threat?pool=${poolAddr}`)
+          .then((r) => r.ok ? r.json() : null)
+          .then((pt) => { if (pt) { setPoolThreat(pt); setLogs((l) => [...l, `✓ Pool threat loaded (${pt.analyzedSwaps} swaps)`]); } })
+          .catch(() => setLogs((l) => [...l, `✗ Pool threat fetch failed`]))
+          .finally(() => setPoolThreatLoading(false));
+      }
     } catch (err) { setError(err.message); setLogs((l) => [...l, `✗ ${err.message}`]); }
     finally { setLoading(false); }
   }
@@ -357,19 +370,31 @@ export default function App() {
               </SectionCard>
 
               {/* ══ 5. POOL THREAT HISTORY ════════════════════════════════════ */}
-              <SectionCard title="Pool Threat History" icon="🔍" badge={<Badge level={sim?.poolThreat?.threatLevel} small />}>
-                <Grid cols={5}>
-                  <KV label="Analyzed Swaps" value={sim?.poolThreat?.analyzedSwaps ?? "—"} />
-                  <KV label="Sandwiches" value={sim?.poolThreat?.sandwichCount ?? 0} accent={sim?.poolThreat?.sandwichCount > 0 ? C.danger : C.accent} />
-                  <KV label="Sandwich Rate" value={pct((sim?.poolThreat?.sandwichRate ?? 0) * 100)} />
-                  <KV label="Avg Excess Slippage" value={pct(sim?.poolThreat?.avgExcessSlippage)} />
-                  <KV label="Total Extracted" value={fmt(sim?.poolThreat?.totalMevExtracted)} />
-                </Grid>
-                <Grid cols={3} gap={12}>
-                  <KV label="Min Attack Size" value={sim?.poolThreat?.minAttackedSizeUsd > 0 ? fmt(sim.poolThreat.minAttackedSizeUsd) : "N/A"} />
-                  <KV label="Max Attack Size" value={sim?.poolThreat?.maxAttackedSizeUsd > 0 ? fmt(sim.poolThreat.maxAttackedSizeUsd) : "N/A"} />
-                  <KV label="Threat Level" value={<Badge level={sim?.poolThreat?.threatLevel} small />} />
-                </Grid>
+              <SectionCard title="Pool Threat History" icon="🔍" badge={
+                poolThreatLoading
+                  ? <span style={{ fontSize: 10, color: C.textDim, fontWeight: 400, marginLeft: 6, animation: "pulse 1.5s ease-in-out infinite" }}>Loading…</span>
+                  : <Badge level={poolThreat?.threatLevel ?? sim?.poolThreat?.threatLevel ?? "LOW"} small />
+              }>
+                {(() => {
+                  const pt = poolThreat || sim?.poolThreat;
+                  if (!pt) return <div style={{ fontSize: 11, color: C.textDim }}>No pool threat data available</div>;
+                  return (
+                    <>
+                      <Grid cols={5}>
+                        <KV label="Analyzed Swaps" value={pt.analyzedSwaps ?? "—"} />
+                        <KV label="Sandwiches" value={pt.sandwichCount ?? 0} accent={pt.sandwichCount > 0 ? C.danger : C.accent} />
+                        <KV label="Sandwich Rate" value={pct((pt.sandwichRate ?? 0) * 100)} />
+                        <KV label="Avg Excess Slippage" value={pct(pt.avgExcessSlippage)} />
+                        <KV label="Total Extracted" value={fmt(pt.totalMevExtracted)} />
+                      </Grid>
+                      <Grid cols={3} gap={12}>
+                        <KV label="Min Attack Size" value={pt.minAttackedSizeUsd > 0 ? fmt(pt.minAttackedSizeUsd) : "N/A"} />
+                        <KV label="Max Attack Size" value={pt.maxAttackedSizeUsd > 0 ? fmt(pt.maxAttackedSizeUsd) : "N/A"} />
+                        <KV label="Threat Level" value={<Badge level={pt.threatLevel ?? "LOW"} small />} />
+                      </Grid>
+                    </>
+                  );
+                })()}
               </SectionCard>
 
               {/* ══ 6. MEV TEMPERATURE ════════════════════════════════════════ */}

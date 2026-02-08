@@ -6,16 +6,38 @@ export async function startServer() {
   registerPoolThreatRoute(app)
 
 app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*")
-  res.setHeader("Access-Control-Allow-Headers", "*")
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+  const origin = req.headers.origin || "*"
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end()
+  // allow origin
+  res.setHeader("Access-Control-Allow-Origin", origin)
+
+  // important for caching proxies
+  res.setHeader("Vary", "Origin")
+
+  // allow methods
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+  )
+
+  // CRITICAL: reflect requested headers
+  const reqHeaders = req.headers["access-control-request-headers"]
+  if (reqHeaders) {
+    res.setHeader("Access-Control-Allow-Headers", reqHeaders)
+  } else {
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
   }
+
+  // preflight cache (reduces spam OPTIONS)
+  res.setHeader("Access-Control-Max-Age", "86400")
+
+  // preflight response
+  if (req.method === "OPTIONS") {
+    return res.status(204).end()
+  }
+
   next()
 })
-
 app.use(express.json())
 
   const agent = new MEVShieldAgent()
