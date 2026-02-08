@@ -1,21 +1,23 @@
 /**
  * SetEnsPolicy — Write MEV Shield preferences to ENS text records
  *
- * Uses wagmi v2 useWriteContract hook to call the ENS Public Resolver's
- * setText(bytes32 node, string key, string value) function.
+ * Uses wagmi 3.x useWriteContract + useWaitForTransactionReceipt.
+ * Calls ENS Public Resolver's setText(bytes32 node, string key, string value).
  *
- * This component lets users set their protection preferences on-chain,
- * which the MEV Shield agent reads automatically on every swap.
+ * REQUIRES: App wrapped in <Web3Provider> and wallet connected.
  *
- * REQUIRES: <WagmiProvider> + connected wallet that owns the ENS name.
+ * INTEGRATION:
+ *   import SetEnsPolicy from "./components/SetEnsPolicy"
+ *
+ *   // In your JSX (inside the sidebar form, below the submit button):
+ *   {ensName && <SetEnsPolicy ensName={ensName} />}
  */
 
-import React, { useState, useMemo } from "react"
+import React, { useState, useMemo, useEffect } from "react"
 import { useWriteContract, useWaitForTransactionReceipt, useAccount } from "wagmi"
-import { namehash } from "viem/ens"
-import { normalize } from "viem/ens"
+import { namehash, normalize } from "viem/ens"
 
-// ENS Public Resolver (latest mainnet deployment)
+// ENS Public Resolver (latest mainnet)
 const PUBLIC_RESOLVER = "0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63"
 
 const RESOLVER_ABI = [
@@ -32,167 +34,209 @@ const RESOLVER_ABI = [
   },
 ]
 
-const MEVSHIELD_KEYS = {
-  riskProfile: { key: "com.mevshield.riskProfile", label: "Risk Profile", options: ["conservative", "balanced", "aggressive"] },
-  privateThreshold: { key: "com.mevshield.privateThreshold", label: "Private Relay Threshold ($)", type: "number" },
-  splitEnabled: { key: "com.mevshield.splitEnabled", label: "Split Enabled", options: ["true", "false"] },
-  maxChunks: { key: "com.mevshield.maxChunks", label: "Max Chunks", type: "number" },
-  preferredChains: { key: "com.mevshield.preferredChains", label: "Preferred Chains", placeholder: "ethereum,arbitrum,base" },
-  slippageTolerance: { key: "com.mevshield.slippageTolerance", label: "Slippage Tolerance (bps)", type: "number" },
+const FIELDS = [
+  { id: "riskProfile",       key: "com.mevshield.riskProfile",       label: "Risk Profile",              options: ["conservative", "balanced", "aggressive"], default: "balanced" },
+  { id: "privateThreshold",  key: "com.mevshield.privateThreshold",  label: "Private Threshold ($)",      type: "number", default: "5000" },
+  { id: "splitEnabled",      key: "com.mevshield.splitEnabled",      label: "Split Enabled",              options: ["true", "false"], default: "true" },
+  { id: "maxChunks",         key: "com.mevshield.maxChunks",         label: "Max Chunks",                 type: "number", default: "10" },
+  { id: "preferredChains",   key: "com.mevshield.preferredChains",   label: "Preferred Chains",           placeholder: "ethereum,arbitrum", default: "ethereum" },
+  { id: "slippageTolerance", key: "com.mevshield.slippageTolerance", label: "Slippage (bps)",             type: "number", default: "50" },
+]
+
+// Styles matching your dark theme
+const S = {
+  bg: "#06060a",
+  surface: "#0c0c12",
+  surfaceAlt: "#101018",
+  border: "#1a1a28",
+  borderLight: "#252538",
+  text: "#d4d4e0",
+  textMuted: "#6b6b80",
+  textDim: "#44445a",
+  accent: "#6ee7b7",
+  accentDim: "#2d6b54",
+  danger: "#ef4444",
 }
-
-// ============================================================================
-// Single record writer hook
-// ============================================================================
-
-export function useSetEnsText(ensName, recordKey, value) {
-  const node = useMemo(
-    () => ensName ? namehash(normalize(ensName)) : undefined,
-    [ensName]
-  )
-
-  const { writeContract, data: hash, isPending, error } = useWriteContract()
-
-  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
-    hash,
-  })
-
-  const write = () => {
-    if (!node || !recordKey || value === undefined) return
-    writeContract({
-      address: PUBLIC_RESOLVER,
-      abi: RESOLVER_ABI,
-      functionName: "setText",
-      args: [node, recordKey, String(value)],
-    })
-  }
-
-  return {
-    write,
-    isPending,
-    isConfirming,
-    isSuccess,
-    error,
-    hash,
-  }
-}
-
-// ============================================================================
-// Full policy editor component
-// ============================================================================
 
 export default function SetEnsPolicy({ ensName, onPolicySet }) {
-  const { address: connectedAddress } = useAccount()
-  const [values, setValues] = useState({
-    riskProfile: "balanced",
-    privateThreshold: "5000",
-    splitEnabled: "true",
-    maxChunks: "10",
-    preferredChains: "ethereum",
-    slippageTolerance: "50",
-  })
-  const [activeKey, setActiveKey] = useState(null)
-  const [txStatus, setTxStatus] = useState({})
+  const { address: connectedAddress, isConnected } = useAccount()
 
-  const { writeContract, data: hash, isPending } = useWriteContract()
-  const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({ hash })
+  // Form values
+  const [values, setValues] = useState(() => {
+    const init = {}
+    FIELDS.forEach((f) => { init[f.id] = f.default })
+    return init
+  })
+
+  // Track which field is being written
+  const [activeField, setActiveField] = useState(null)
+  const [fieldStatus, setFieldStatus] = useState({}) // { fieldId: "pending" | "confirmed" | "error" }
+
+  // wagmi 3.x: useWriteContract returns { writeContract, data (hash), isPending, error }
+  const {
+    writeContract,
+    data: txHash,
+    isPending: isWriting,
+    error: writeError,
+    reset: resetWrite,
+  } = useWriteContract()
+
+  // Wait for confirmation
+  const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
+    hash: txHash,
+  })
+
+  // When tx confirms, update status
+  useEffect(() => {
+    if (isConfirmed && activeField) {
+      setFieldStatus((prev) => ({ ...prev, [activeField]: "confirmed" }))
+      if (onPolicySet) onPolicySet(activeField, values[activeField])
+    }
+  }, [isConfirmed, activeField])
+
+  // When write errors, update status
+  useEffect(() => {
+    if (writeError && activeField) {
+      setFieldStatus((prev) => ({ ...prev, [activeField]: "error" }))
+    }
+  }, [writeError, activeField])
 
   if (!ensName) {
     return (
-      <div style={{ padding: 16, color: "#6b6b80", fontSize: 12 }}>
-        Connect a wallet with an ENS name to set your MEV Shield policy.
+      <div style={{ padding: 12, color: S.textDim, fontSize: 11 }}>
+        No ENS name detected. Connect a wallet with an ENS name to set your policy.
       </div>
     )
   }
 
-  const handleSet = async (keyName) => {
-    const config = MEVSHIELD_KEYS[keyName]
-    const value = values[keyName]
-    if (!config || !value) return
+  if (!isConnected) {
+    return (
+      <div style={{ padding: 12, color: S.textDim, fontSize: 11 }}>
+        Connect your wallet to set ENS policy records.
+        <br />
+        <span style={{ fontSize: 9, marginTop: 4, display: "block" }}>
+          Use the <code>&lt;appkit-button&gt;</code> or <code>useAppKit().open()</code>
+        </span>
+      </div>
+    )
+  }
 
+  function handleSet(field) {
     const node = namehash(normalize(ensName))
-    setActiveKey(keyName)
+    const value = values[field.id]
 
-    try {
-      writeContract({
-        address: PUBLIC_RESOLVER,
-        abi: RESOLVER_ABI,
-        functionName: "setText",
-        args: [node, config.key, String(value)],
-      })
-      setTxStatus((prev) => ({ ...prev, [keyName]: "pending" }))
-    } catch (err) {
-      setTxStatus((prev) => ({ ...prev, [keyName]: "error" }))
-    }
+    setActiveField(field.id)
+    setFieldStatus((prev) => ({ ...prev, [field.id]: "pending" }))
+    resetWrite() // clear previous tx state
+
+    writeContract({
+      address: PUBLIC_RESOLVER,
+      abi: RESOLVER_ABI,
+      functionName: "setText",
+      args: [node, field.key, String(value)],
+    })
   }
 
-  // Track tx confirmation
-  if (isSuccess && activeKey && txStatus[activeKey] === "pending") {
-    setTxStatus((prev) => ({ ...prev, [activeKey]: "confirmed" }))
-    if (onPolicySet) onPolicySet(activeKey, values[activeKey])
-  }
+  const isBusy = isWriting || isConfirming
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ fontSize: 11, color: "#6ee7b7", fontWeight: 600, marginBottom: 4 }}>
-        ✏️ Set MEV Shield Policy for {ensName}
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 6,
+      padding: 12, background: S.surface,
+      border: `1px solid ${S.border}`, borderRadius: 6,
+    }}>
+      <div style={{ fontSize: 10, color: S.accent, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+        ✏️ Set MEV Shield Policy — {ensName}
       </div>
 
-      {Object.entries(MEVSHIELD_KEYS).map(([keyName, config]) => (
-        <div key={keyName} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <label style={{ fontSize: 10, color: "#6b6b80", width: 140, flexShrink: 0 }}>
-            {config.label}
-          </label>
+      {FIELDS.map((field) => {
+        const status = fieldStatus[field.id]
+        const isActive = activeField === field.id && isBusy
 
-          {config.options ? (
-            <select
-              value={values[keyName]}
-              onChange={(e) => setValues((v) => ({ ...v, [keyName]: e.target.value }))}
+        return (
+          <div key={field.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            {/* Label */}
+            <span style={{ fontSize: 10, color: S.textMuted, width: 110, flexShrink: 0 }}>
+              {field.label}
+            </span>
+
+            {/* Input */}
+            {field.options ? (
+              <select
+                value={values[field.id]}
+                onChange={(e) => setValues((v) => ({ ...v, [field.id]: e.target.value }))}
+                style={{
+                  flex: 1, padding: "4px 6px", fontSize: 11,
+                  background: S.surfaceAlt, border: `1px solid ${S.border}`,
+                  color: S.text, borderRadius: 3, fontFamily: "inherit",
+                }}
+              >
+                {field.options.map((opt) => (
+                  <option key={opt} value={opt}>{opt}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type={field.type || "text"}
+                value={values[field.id]}
+                onChange={(e) => setValues((v) => ({ ...v, [field.id]: e.target.value }))}
+                placeholder={field.placeholder || ""}
+                style={{
+                  flex: 1, padding: "4px 6px", fontSize: 11,
+                  background: S.surfaceAlt, border: `1px solid ${S.border}`,
+                  color: S.text, borderRadius: 3, fontFamily: "inherit",
+                  outline: "none", boxSizing: "border-box",
+                }}
+              />
+            )}
+
+            {/* Set button */}
+            <button
+              onClick={() => handleSet(field)}
+              disabled={isActive}
               style={{
-                flex: 1, padding: "4px 6px", fontSize: 11,
-                background: "#101018", border: "1px solid #1a1a28",
-                color: "#d4d4e0", borderRadius: 3,
+                padding: "3px 8px", fontSize: 9, fontWeight: 600,
+                background: status === "confirmed" ? S.accentDim :
+                            status === "error" ? S.danger + "33" : S.surfaceAlt,
+                border: `1px solid ${
+                  status === "confirmed" ? S.accent :
+                  status === "error" ? S.danger :
+                  S.borderLight
+                }`,
+                color: status === "confirmed" ? S.accent :
+                       status === "error" ? S.danger : S.text,
+                borderRadius: 3, cursor: isActive ? "wait" : "pointer",
+                opacity: isActive ? 0.5 : 1,
+                minWidth: 32,
               }}
             >
-              {config.options.map((opt) => (
-                <option key={opt} value={opt}>{opt}</option>
-              ))}
-            </select>
-          ) : (
-            <input
-              type={config.type || "text"}
-              value={values[keyName]}
-              onChange={(e) => setValues((v) => ({ ...v, [keyName]: e.target.value }))}
-              placeholder={config.placeholder || ""}
-              style={{
-                flex: 1, padding: "4px 6px", fontSize: 11,
-                background: "#101018", border: "1px solid #1a1a28",
-                color: "#d4d4e0", borderRadius: 3, fontFamily: "inherit",
-              }}
-            />
-          )}
+              {status === "confirmed" ? "✓" :
+               isActive ? "…" :
+               status === "error" ? "✗" :
+               "Set"}
+            </button>
+          </div>
+        )
+      })}
 
-          <button
-            onClick={() => handleSet(keyName)}
-            disabled={isPending && activeKey === keyName}
-            style={{
-              padding: "4px 10px", fontSize: 10, fontWeight: 600,
-              background: txStatus[keyName] === "confirmed" ? "#2d6b54" : "#1a1a28",
-              border: `1px solid ${txStatus[keyName] === "confirmed" ? "#6ee7b7" : "#252538"}`,
-              color: txStatus[keyName] === "confirmed" ? "#6ee7b7" : "#d4d4e0",
-              borderRadius: 3, cursor: "pointer",
-              opacity: (isPending && activeKey === keyName) ? 0.5 : 1,
-            }}
-          >
-            {txStatus[keyName] === "confirmed" ? "✓" :
-             txStatus[keyName] === "pending" ? "…" :
-             "Set"}
-          </button>
+      {/* Status line */}
+      {txHash && (
+        <div style={{ fontSize: 9, color: S.textDim, marginTop: 2 }}>
+          tx: {txHash.slice(0, 10)}…{txHash.slice(-8)}
+          {isConfirming && " (confirming…)"}
+          {isConfirmed && " ✓"}
         </div>
-      ))}
+      )}
 
-      <div style={{ fontSize: 9, color: "#44445a", marginTop: 4 }}>
-        Each record requires a separate on-chain transaction. Records are stored on your ENS name and read automatically by MEV Shield.
+      {writeError && (
+        <div style={{ fontSize: 9, color: S.danger, marginTop: 2 }}>
+          {writeError.shortMessage || writeError.message?.slice(0, 80)}
+        </div>
+      )}
+
+      <div style={{ fontSize: 8, color: S.textDim, marginTop: 4, lineHeight: 1.4 }}>
+        Each record is a separate on-chain transaction on the ENS Public Resolver.
+        Your wallet must own this ENS name or be an authorized operator.
       </div>
     </div>
   )

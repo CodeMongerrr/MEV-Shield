@@ -1,6 +1,9 @@
+
+
 import { useState, useEffect, useRef } from "react";
 import { useEnsResolver } from "./hooks/useEnsResolver";
-
+import SetEnsPolicy from "./components/SetEnsPolicy";
+import { ConnectButton } from "@rainbow-me/rainbowkit";
 // ── API Config ──────────────────────────────────────────────────────────────
 const API_BASE = "http://localhost:3001";
 
@@ -154,7 +157,7 @@ export default function App() {
   const [poolThreatLoading, setPoolThreatLoading] = useState(false);
   const logRef = useRef(null);
   // State
-  const [userInput, setUserInput] = useState("vitalik.eth");
+  const [userInput, setUserInput] = useState("joshi.eth");
   const [resolvedUser, setResolvedUser] = useState(null);
   const [ensName, setEnsName] = useState(null);
   const [ensPolicy, setEnsPolicy] = useState(null);
@@ -278,6 +281,12 @@ export default function App() {
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         {/* ── Left Panel: Swap Form ──────── */}
         <aside style={{ width: 300, borderRight: `1px solid ${C.border}`, padding: 16, flexShrink: 0, display: "flex", flexDirection: "column" }}>
+          {/* Wallet Connection (for ENS policy writing) */}
+<div style={{ marginBottom: 12 }}>
+  <div style={{ fontSize: 9, color: C.textDim, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>
+     <ConnectButton size="sm" />
+  </div>
+</div>
           <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12, flex: 1 }}>
             <div style={{ fontSize: 9, color: C.textDim, textTransform: "uppercase", letterSpacing: "0.1em" }}>Swap Parameters</div>
             {/* User input with ENS resolution */}
@@ -340,7 +349,17 @@ export default function App() {
 
             {error && <div style={{ padding: 8, background: C.dangerDim, border: `1px solid ${C.danger}33`, borderRadius: 4, fontSize: 11, color: C.danger, wordBreak: "break-all" }}>{error}</div>}
           </form>
-
+          {/* ── ENS Policy Writer ── */}
+{ensName && (
+  <div style={{ marginTop: 12 }}>
+    <SetEnsPolicy
+      ensName={ensName}
+      onPolicySet={(field, value) => {
+        console.log(`ENS policy updated: ${field} = ${value}`)
+      }}
+    />
+  </div>
+)}
           {/* Log */}
           <div style={{ marginTop: 12, borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
             <div style={{ fontSize: 9, color: C.textDim, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4 }}>Request Log</div>

@@ -1,49 +1,45 @@
 import express from "express"
 import { MEVShieldAgent } from "../core/agent"
 import { registerPoolThreatRoute } from "./poolThreatRoute"
+import { resolveUserInput, fetchUserPolicy } from "../perception/ens"
+
 export async function startServer() {
   const app = express()
   registerPoolThreatRoute(app)
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin || "*"
+  app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*")
+    res.setHeader("Access-Control-Allow-Headers", "*")
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    if (req.method === "OPTIONS") return res.status(200).end()
+    next()
+  })
 
-  // allow origin
-  res.setHeader("Access-Control-Allow-Origin", origin)
-
-  // important for caching proxies
-  res.setHeader("Vary", "Origin")
-
-  // allow methods
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-  )
-
-  // CRITICAL: reflect requested headers
-  const reqHeaders = req.headers["access-control-request-headers"]
-  if (reqHeaders) {
-    res.setHeader("Access-Control-Allow-Headers", reqHeaders)
-  } else {
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
-  }
-
-  // preflight cache (reduces spam OPTIONS)
-  res.setHeader("Access-Control-Max-Age", "86400")
-
-  // preflight response
-  if (req.method === "OPTIONS") {
-    return res.status(204).end()
-  }
-
-  next()
-})
-app.use(express.json())
+  app.use(express.json())
 
   const agent = new MEVShieldAgent()
+
   app.post("/swap", async (req, res) => {
     const result = await agent.handleSwap(req.body)
     res.json(result)
+  })
+
+  // ENS resolution endpoint
+  app.get("/resolve", async (req, res) => {
+    const input = req.query.input as string
+    if (!input) return res.status(400).json({ error: "Missing input param" })
+    const result = await resolveUserInput(input)
+    res.json(result)
+  })
+
+  // ENS policy endpoint — read user's on-chain MEV Shield config
+  app.get("/policy", async (req, res) => {
+    const address = req.query.address as string
+    if (!address || !/^0x[a-fA-F0-9]{40}$/i.test(address)) {
+      return res.status(400).json({ error: "Invalid address" })
+    }
+    const policy = await fetchUserPolicy(address)
+    res.json(policy)
   })
 
   app.listen(3001, () => console.log("🚀 Agent API on :3001"))

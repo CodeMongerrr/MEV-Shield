@@ -18,4 +18,7 @@ export interface UserPolicy {
   privateThresholdUsd: number
   splitEnabled: boolean
   riskProfile: "conservative" | "balanced" | "aggressive"
+  maxChunks: number
+  preferredChains: string[]
+  slippageTolerance: number // basis points
 }
