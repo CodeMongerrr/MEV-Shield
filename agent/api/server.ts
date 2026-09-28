@@ -42,5 +42,12 @@ export async function startServer() {
     res.json(policy)
   })
 
-  app.listen(3001, () => console.log("🚀 Agent API on :3001"))
+  const port = Number(process.env.PORT) || 3001
+  app.listen(port, (err?: Error) => {
+    if (err) {
+      console.error(`❌ Could not start Agent API on :${port}: ${err.message}`)
+      process.exit(1)
+    }
+    console.log(`🚀 Agent API on :${port}`)
+  })
 }
