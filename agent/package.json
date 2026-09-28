@@ -1,15 +1,20 @@
 {
   "name": "agent",
   "version": "1.0.0",
-  "description": "",
+  "description": "MEV Shield agent. Simulates sandwich attacks on live Uniswap V2 reserves and searches for the cheapest execution plan.",
   "main": "index.ts",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only index.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p .",
+    "start": "node dist/index.js",
+    "worker:dev": "npx wrangler dev",
+    "worker:check": "npx wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "deploy": "npx wrangler deploy"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Aditya Joshi",
+  "license": "MIT",
   "packageManager": "pnpm@9.11.0+sha512.0a203ffaed5a3f63242cd064c8fb5892366c103e328079318f78062f24ea8c9d50bc6a47aa3567cabefd824d170e78fa2745ed1f16b132e16436146b7688f19b",
   "dependencies": {
     "dotenv": "^17.2.3",
