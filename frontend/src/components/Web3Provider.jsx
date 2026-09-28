@@ -11,7 +11,7 @@
  */
 
 import React from "react"
-import { WagmiProvider, createConfig, http } from "wagmi"
+import { WagmiProvider, http } from "wagmi"
 import { mainnet } from "wagmi/chains"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import {
@@ -19,14 +19,15 @@ import {
   getDefaultConfig,
 } from "@rainbow-me/rainbowkit"
 import "@rainbow-me/rainbowkit/styles.css"
+import { WALLETCONNECT_PROJECT_ID, MAINNET_RPC_URL } from "../config"
 
 const config = getDefaultConfig({
   appName: "MEV Shield",
-  // Get a free project ID at https://cloud.walletconnect.com
-  projectId: "55f53bbc51596960347001e0a1a37847" || "YOUR_PROJECT_ID",
+  // Get a free project ID at https://cloud.reown.com and set VITE_WALLETCONNECT_PROJECT_ID
+  projectId: WALLETCONNECT_PROJECT_ID,
   chains: [mainnet],
   transports: {
-    [mainnet.id]: http("" || "https://eth.llamarpc.com"),
+    [mainnet.id]: http(MAINNET_RPC_URL),
   },
 })
 
