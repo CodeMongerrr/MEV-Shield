@@ -364,8 +364,8 @@ async function fetchBridgeCost(
 
     try {
         const quote = await getLiFiQuote({
-            fromChain: String(fromChainId),   // LI.FI expects string chain IDs
-            toChain: String(toChainId),
+            fromChain: fromChainId,   // getLiFiQuote stringifies chain IDs for the query
+            toChain: toChainId,
             fromToken: tokenIn,
             toToken: toTokenMapped,
             fromAmount: testAmount.toString(),
@@ -1079,7 +1079,7 @@ export async function optimize(
 
     for (const privRatio of privateRatios) {
         // If 100% private, nPublic=0
-        const maxPublic = privRatio >= 1.0 ? 0 : maxChunks
+        const maxPublic = privRatio >= 1.0 ? 0 : effectiveMaxChunks
         // If 0% private, at least 1 public chunk
         const minPublic = privRatio >= 1.0 ? 0 : 1
 
