@@ -84,6 +84,9 @@ export async function execute(
           privateThresholdUsd: 5000,
           splitEnabled: true,
           riskProfile: "balanced",
+          maxChunks: 10,
+          preferredChains: ["ethereum"],
+          slippageTolerance: 50,
         }, tradeSizeUsd)
 
         const splitResult = await buildSplitPlan(intent, fallbackPlan, sim)
