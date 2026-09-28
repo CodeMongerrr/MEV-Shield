@@ -1,0 +1,8 @@
+# Cloudflare Worker that serves the built dashboard (dist) as static assets. No server code.
+# Build first with VITE_API_URL pointing at the API Worker, then `npx wrangler deploy`.
+name = "mev-shield"
+compatibility_date = "2026-09-01"
+
+[assets]
+directory = "./dist"
+not_found_handling = "single-page-application"
