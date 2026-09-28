@@ -20,6 +20,11 @@ yarn-error.log*
 .env
 .env.*
 !.env.example
+.dev.vars
+.dev.vars.*
+
+# Cloudflare Wrangler local state
+.wrangler/
 
 # OS junk
 .DS_Store
