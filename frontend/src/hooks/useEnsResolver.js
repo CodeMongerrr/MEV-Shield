@@ -9,8 +9,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from "react"
-
-const API_BASE = "http://localhost:3001"
+import { API_BASE } from "../config"
 
 // ============================================================================
 // useEnsResolver — Debounced ENS resolution via backend
