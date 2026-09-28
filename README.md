@@ -1,309 +1,258 @@
-# 🛡️ MEV Shield
+# MEV Shield
 
-**Autonomous Execution Firewall for DeFi**
+Simulates the sandwich bot before you swap, then finds the cheapest way to trade around it.
 
-MEV Shield is a calculus-driven optimization engine that protects DeFi users from sandwich attacks and MEV extraction. It simulates attacks before they happen, derives optimal execution strategies using real mathematics, and stores user protection preferences as ENS text records — making MEV defense portable, decentralized, and identity-native.
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](agent/tsconfig.json)
+[![viem](https://img.shields.io/badge/viem-2.45-1E1E20)](https://viem.sh)
+[![License MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Release v1.0.0](https://img.shields.io/badge/release-v1.0.0-blue)](https://github.com/CodeMongerrr/MEV-Shield/releases)
+[![ETHGlobal HackMoney 2026](https://img.shields.io/badge/ETHGlobal-HackMoney%202026-5B4BFF)](https://ethglobal.com/events/hackmoney2026)
 
-Built for [ETHGlobal HackMoney 2026](https://ethglobal.com/events/hackmoney2026).
+MEV Shield is a TypeScript agent and a React dashboard, built solo during [ETHGlobal HackMoney 2026](https://ethglobal.com/events/hackmoney2026). Give it a swap and it reads the live Uniswap V2 pool, replays what a sandwich bot would do to that exact trade, and prices three ways to execute it. A single public swap, a Flashbots private relay, or a hybrid that sends part of the trade privately and the rest as public chunks too small to be worth attacking. It returns the cheapest plan with every cost broken out, plus a transaction outline for each leg.
 
----
+## What it does
 
-## The Problem
+A large swap sitting in the public mempool gets sandwiched. A bot buys just before it, lets it push the price further, then sells right after. Routing the whole trade through a private relay avoids the bot, but in this model the builder tip needed to get included grows with the square of the trade size. MEV Shield puts a dollar figure on each option for the specific trade and pool, then picks the lowest.
 
-Every swap on a public DEX is visible in the mempool before it's mined. Sandwich bots exploit this by frontrunning your trade to move the price against you, then backrunning to capture the difference. Since 2020, over **$24 billion** has been extracted from DeFi users through MEV.
+### Sample result
 
-Existing solutions are binary — either use a private relay (which has costs) or don't (and get sandwiched). Nobody asks the real question: **what's the mathematically cheapest way to protect this specific trade?**
+Modeled on live Ethereum mainnet data on 29 September 2026 for a 250 WETH to USDT swap. The Uniswap V2 pool held about 2,813 WETH and 7.54M USDT, so the trade was 4.4% of pool depth.
 
-## The Solution
+- **Unprotected swap.** Modeled sandwich loss of $47,871, which is 7.8% of the $614,040 the trade would return without an attack.
+- **Whole trade through the private relay.** $2,323 in gas and builder tip.
+- **Chosen plan, with the default cap of 10 public chunks.** 50% through the private relay and the rest in 10 public chunks, for $1,310 in total modeled cost. That is 97.3% below the unprotected cost of $47,881.
 
-MEV Shield evaluates three strategies for every trade and picks the one with the lowest total cost:
+These are model outputs, not executed trades. They move with pool reserves, gas and the ETH price, so a rerun gives different numbers. The exact request is in the Quickstart.
 
-| Strategy | How It Works | When It Wins |
-|----------|-------------|--------------|
-| **Single Public** | Normal swap, no protection | Trade is below bot profitability threshold |
-| **Private Relay** | Route through Flashbots, hidden from mempool | Mid-size trades where relay tip < MEV exposure |
-| **Optimal Chunking** | Split into n pieces sized below attack threshold | Whale trades where relay tip scales quadratically |
+## How it works
 
-The optimizer adapts in real-time — three different trade sizes can produce three different optimal strategies.
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Frontend (React)                     │
-│  ┌───────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │ Swap Interface │  │ ENS Identity │  │ SetEnsPolicy │  │
-│  │   (App.jsx)   │  │    Badge     │  │  (on-chain)  │  │
-│  └───────┬───────┘  └──────┬───────┘  └──────┬───────┘  │
-│          │                 │                  │          │
-│  ┌───────┴─────────────────┴──────────────────┴───────┐  │
-│  │         wagmi hooks: useEnsIdentity,               │  │
-│  │         useEnsResolver, useEnsPolicy               │  │
-│  └────────────────────────┬───────────────────────────┘  │
-└───────────────────────────┼──────────────────────────────┘
-                            │ HTTP
-┌───────────────────────────┼──────────────────────────────┐
-│                    Agent Backend (TS)                     │
-│                           │                              │
-│  ┌────────────────────────┴───────────────────────────┐  │
-│  │              Express API Server                     │  │
-│  │  POST /swap  GET /resolve  GET /policy  GET /pool   │  │
-│  └──┬──────────────┬──────────────┬───────────────────┘  │
-│     │              │              │                       │
-│  ┌──┴───┐   ┌──────┴──────┐   ┌──┴────────────────┐     │
-│  │ MEV  │   │     ENS     │   │  Pool Threat       │     │
-│  │Shield│   │  Resolution │   │  Analyzer          │     │
-│  │Agent │   │  + Policy   │   │  (Sandwich         │     │
-│  │      │   │  Fetch      │   │   Detection)       │     │
-│  └──┬───┘   └─────────────┘   └────────────────────┘     │
-│     │                                                    │
-│  ┌──┴──────────────────────────────────────────────────┐ │
-│  │              Chunk Optimizer                         │ │
-│  │  Sandwich Simulation → Cost Function → Newton-      │ │
-│  │  Raphson → Grid Search → 3-Way Strategy Comparison  │ │
-│  └─────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  UI[React dashboard] -->|POST /swap| API[Express API]
+  API --> POL[ENS policy reader]
+  API --> SIM[Sandwich simulator]
+  SIM -->|reserves, gas| RPC[(Ethereum RPC)]
+  SIM -->|USD prices| LIFI[(LI.FI API)]
+  SIM -->|recent swaps| SG[(Uniswap V2 subgraph)]
+  SIM --> DEC[Decision engine]
+  DEC --> OPT[Route search]
+  OPT --> PLAN[Plan builder]
+  PLAN -->|unsigned txs| UI
+  UI -->|setText| ENS[(ENS PublicResolver)]
 ```
 
----
+1. **Policy.** The agent reverse resolves the user address to an ENS name and reads six `com.mevshield.*` text records with viem, falling back to defaults when none are set.
+2. **Simulation.** It finds the pair through the Uniswap V2 factory, reads reserves and decimals, takes the gas price from the RPC and USD prices from LI.FI, then runs the sandwich in `bigint`. Front run, victim swap on the moved pool, back run. The attack only counts if the bot clears the gas for a 300,000 gas sandwich.
+3. **History.** With a Graph API key it also pulls the pool's recent swaps from the Uniswap V2 subgraph and flags trades that lost more than the curve explains. A high sandwich rate raises the risk level.
+4. **Decision.** Unprofitable attacks, low risk trades and medium risk trades under $500 go straight to a public swap. Everything else goes to the route search.
+5. **Route search.** Every mix of private share and public chunk count is priced and the cheapest plan wins.
+6. **Plan.** The agent builds Uniswap V2 router calldata for every public chunk, replaying each chunk against the reserves left by the one before it, and an unsigned private relay transaction when part of the trade goes private. The API returns a preview of each with truncated calldata. Nothing is signed or sent.
 
-## The Math
+### The math
 
-The core optimization minimizes total execution cost as a function of chunk count.
-
-### Cost Function
-
-```
-C(n) = M/n + n·G
-```
-
-- **M** — Total MEV exposure (USD). Derived from sandwich simulation against live pool state.
-- **n** — Number of chunks the trade is split into.
-- **G** — Gas cost per swap (USD). Fetched from live gas oracles.
-
-The first term (M/n) captures MEV reduction: sandwich profit scales with the square of trade size relative to pool liquidity (`MEV ∝ chunk²/L`), so splitting into n equal chunks reduces total MEV by a factor of n.
-
-The second term (n·G) captures gas overhead: each chunk is a separate on-chain transaction.
-
-### Analytical Optimum
-
-Taking the derivative and setting it to zero:
+Swap output uses the same integer formula as `UniswapV2Library.getAmountOut`, with the 0.3% fee.
 
 ```
-dC/dn = −M/n² + G = 0
-    →  n* = √(M/G)
+out = (in * 997 * reserveOut) / (reserveIn * 1000 + in * 997)
 ```
 
-The optimal chunk count is the square root of MEV-to-gas ratio.
-
-### Newton-Raphson Refinement
-
-The analytical solution assumes smooth, continuous costs. Real-world cost functions have discrete effects (threshold where chunks become safe, chain-specific gas, relay tip scaling), so MEV Shield refines using numerical Newton-Raphson:
-
-1. Start at n₀ = √(M/G)
-2. Evaluate C(n-1), C(n), C(n+1)
-3. Compute central difference derivative: `dC ≈ (C(n+1) - C(n-1)) / 2`
-4. Compute second derivative: `d²C ≈ C(n+1) - 2·C(n) + C(n-1)`
-5. Newton step: `n ← n - dC/d²C`
-6. Repeat until convergence, then grid search ±10 around result
-
-### Private Relay Cost Model
-
-Private relay cost is derived from the constant-product AMM invariant, not from fixed parameters:
-
-1. **Price displacement**: `δ = Δx / reserveIn` — fractional pool displacement from the trade
-2. **Created arbitrage**: `arb = k · L · δ²` — extractable value scales quadratically with displacement
-3. **Builder payment**: Searchers capture ~60% of arb, bid ~70% to builder → effective tip ≈ 42% of theoretical arb
-4. **User cost**: Must exceed best searcher bid by ~10% inclusion premium
-
-This means private relay cost scales quadratically with trade size relative to pool depth — which is why it loses to chunking for large trades.
-
----
-
-## ENS Integration
-
-MEV Shield uses ENS text records as a **decentralized policy layer**. Protection preferences are stored on-chain under the `com.mevshield` namespace, portable across any wallet or dApp.
-
-### Text Record Schema
-
-| Key | Example | Description |
-|-----|---------|-------------|
-| `com.mevshield.riskProfile` | `conservative` | Execution style: conservative / balanced / aggressive |
-| `com.mevshield.privateThreshold` | `5000` | USD threshold above which private relay is considered |
-| `com.mevshield.splitEnabled` | `true` | Whether order splitting is allowed |
-| `com.mevshield.maxChunks` | `10` | Maximum number of chunks permitted |
-| `com.mevshield.preferredChains` | `ethereum,arbitrum` | Chains the user prefers for execution |
-| `com.mevshield.slippageTolerance` | `50` | Acceptable slippage in basis points (50 = 0.5%) |
-
-### How It Works
-
-1. **Wallet connects** → frontend resolves ENS name via custom `useEnsIdentity` hook
-2. **Backend reads policy** → `ens.ts` fetches all `com.mevshield.*` text records via viem
-3. **Optimizer uses policy** → chunk limits, relay thresholds, and risk profile feed into the cost function
-4. **User updates policy** → `SetEnsPolicy` component calls `PublicResolver.setText()` directly on-chain
-
-No database. No API keys. Your MEV preferences live on your ENS name and travel with your identity.
-
-### Custom ENS Code (Beyond RainbowKit)
-
-- **`useEnsIdentity`** — wagmi v2 hook for bidirectional address ↔ ENS resolution with avatar support
-- **`useEnsResolver`** — standalone hook that calls backend `/resolve` + `/policy` endpoints
-- **`useEnsPolicy`** — reads all six `com.mevshield.*` text records as structured policy
-- **`SetEnsPolicy`** — React component that writes ENS text records via `writeContract` to the PublicResolver
-- **`ens.ts`** — backend module: forward/reverse resolution, text record reads, avatar fetch, policy parsing with caching
-
----
-
-## Project Structure
+The bot's front run is sized from the pool and the victim input with an integer square root, and its profit is the back run proceeds minus the front run cost.
 
 ```
-mev-shield/
-├── agent/
-│   ├── api/
-│   │   └── server.ts              # Express API: /swap, /resolve, /policy, /pool-threat
-│   ├── core/
-│   │   ├── agent.ts               # MEV Shield agent orchestrator
-│   │   ├── types.ts               # SwapIntent, UserPolicy, SimulationResult
-│   │   └── config.ts              # viem public client, chain config
-│   ├── perception/
-│   │   ├── ens.ts                 # ENS resolution + policy fetch (viem)
-│   │   └── poolThreatAnalyzer.ts  # Historical sandwich detection via Uniswap subgraph
-│   └── reasoning/
-│       ├── chunkOptimizer.ts      # Core optimizer: simulation → Newton-Raphson → strategy comparison
-│       └── decisionEngine.ts      # Strategy selection + execution plan builder
-│
-├── frontend/
-│   ├── src/
-│   │   ├── App.jsx                # Main UI: swap form, results dashboard, ENS badge
-│   │   ├── components/
-│   │   │   ├── SetEnsPolicy.jsx   # On-chain ENS text record writer
-│   │   │   └── Web3Provider.jsx   # RainbowKit + wagmi v2 provider setup
-│   │   └── hooks/
-│   │       ├── useEnsIdentity.ts  # wagmi v2 hook: address ↔ ENS bidirectional
-│   │       └── useEnsResolver.js  # Standalone hook: backend-powered resolution
-│   └── ...
-│
-└── README.md
+gR = 997 * reserveIn / 1000
+gX = 997 * victimIn / 1000
+frontRun = isqrt(gR * (gR + gX)) - gR
+victimLoss = cleanOut - attackedOut
+viable = botProfitUsd > gasPrice * 300000 * ethUsd
 ```
 
-## API Endpoints
+The private relay price comes from the arbitrage the trade leaves behind in a constant product pool. A searcher would pay the builder part of that arbitrage, so the user has to outbid it.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/swap` | Run full MEV analysis + optimization for a swap intent |
-| `GET` | `/resolve?input=` | Resolve ENS name → address or address → ENS name |
-| `GET` | `/policy?address=` | Fetch user's on-chain MEV Shield policy from ENS text records |
-| `GET` | `/ens-keys` | Return the ENS text record key schema |
-| `GET` | `/pool-threat?pool=` | Analyze historical sandwich attack frequency for a Uniswap pool |
-| `POST` | `/pool-threat` | Same analysis with POST body parameters |
+```
+delta     = tradeUsd / reserveInUsd
+arb       = reserveInUsd * delta^2
+bid       = max(0, 0.6 * arb - 0.50) * 0.7
+tip       = max(1.1 * bid, 0.10) * 0.1
+relayCost = gasPrice * 180000 * ethUsd + tip
+```
 
-### Example: Swap Analysis
+### Route search
+
+The search tries a private share `p` of 0%, 10% and so on up to 100%, and for each share from 1 public chunk up to the chunk cap. The cap is the user's ENS `maxChunks` (default 10, at most 50), and never more than 100, or 20 for trades above $1M. A fully private trade has no public chunks, so the default cap gives 101 plans per trade and the largest cap gives 501. Each plan is priced as
+
+```
+cost(p, n) = relayGas + max(tip * p^2, 0.10)              private leg, when p > 0
+           + sum over n chunks of (chunkMev + chunkGas)    public legs
+           + tradeUsd * 0.00002 * sqrt(legs)               price drift while legs land
+```
+
+`chunkMev` is zero below the size where a sandwich stops paying for its gas, and above it scales with the square of the chunk size against an effective liquidity calibrated so the full trade reproduces the simulated loss. `chunkGas` rises slightly with each chunk to reflect priority fee competition. The cheapest of the unprotected swap, the full private relay and the best hybrid is returned, with the full breakdown.
+
+## Quickstart
+
+Requires Node.js 22 or newer (tested on 23.11), pnpm 9 or newer for the agent and npm for the dashboard.
+
+```bash
+git clone https://github.com/CodeMongerrr/MEV-Shield.git
+cd MEV-Shield/agent
+pnpm install --frozen-lockfile
+cp .env.example .env        # set RPC_URL, see Configuration
+pnpm dev                    # API on http://localhost:3001
+```
+
+In a second terminal, analyse a 250 WETH to USDT swap. This is the request behind the sample result.
 
 ```bash
 curl -X POST http://localhost:3001/swap \
   -H "Content-Type: application/json" \
   -d '{
-    "user": "vitalik.eth",
+    "user": "0x0000000000000000000000000000000000000001",
     "tokenIn": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-    "tokenOut": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-    "amountIn": "5000000000000000000",
+    "tokenOut": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    "amountIn": "250000000000000000000",
     "chainId": 1
   }'
 ```
 
-Response includes: risk level, MEV exposure estimate, three-strategy cost comparison, optimal chunk breakdown, and the winning strategy recommendation.
+Then start the dashboard.
 
----
+```bash
+cd MEV-Shield/frontend
+npm ci                      # .npmrc sets legacy-peer-deps for RainbowKit and wagmi
+cp .env.example .env.local  # point VITE_API_URL at the agent
+npm run dev                 # http://localhost:5173
+```
 
-## Getting Started
+Checks that CI runs.
 
-### Prerequisites
+```bash
+cd agent && pnpm typecheck && pnpm build && pnpm worker:check
+cd frontend && npm ci && npm run build
+```
 
-- Node.js ≥ 18
-- An Ethereum RPC endpoint (Alchemy / Infura)
-- A WalletConnect / Reown project ID (for frontend wallet connection)
+### Run on Cloudflare Workers
 
-### Backend
+The API also runs as a Cloudflare Worker. `agent/worker.ts` serves the same routes with a fetch handler and the same analysis code, and `frontend/wrangler.toml` serves the built dashboard as static assets. Both run locally without a Cloudflare account.
 
 ```bash
 cd agent
-npm install
-cp .env.example .env  # Add your RPC URL
-npm run dev            # Starts on :3001
+cp .env.example .env        # wrangler dev reads RPC_URL from .env or .dev.vars
+pnpm worker:dev             # API on http://localhost:8787
+
+cd ../frontend
+VITE_API_URL=http://localhost:8787 npm run build
+npx wrangler dev --port 8788   # dashboard on http://localhost:8788
 ```
 
-### Frontend
+To deploy, set `RPC_URL` as a secret on the API Worker and run `npx wrangler deploy` in `agent`, then build the dashboard with `VITE_API_URL` set to the API Worker URL and run `npx wrangler deploy` in `frontend`. Set `ALLOWED_ORIGIN` on the API Worker to the dashboard URL.
 
-```bash
-cd frontend
-npm install
-cp .env.example .env  # Add Reown project ID
-npm run dev            # Starts on :5173
+The first `/swap` on a fresh Worker isolate uses about 40 ms of CPU and a warm one about 4 to 6 ms (measured locally on the bundled Worker). The route search itself takes about 2 ms even at 1,001 plans. The Workers Free plan allows 10 ms of CPU per request, so the first request on a fresh isolate can fail there. The Workers Paid plan allows 30 seconds by default.
+
+### API
+
+- `POST /swap` runs the full analysis for `{ user, tokenIn, tokenOut, amountIn, chainId }` and returns the simulation, the three way comparison, the chosen plan and a preview of each transaction.
+- `GET /resolve?input=` resolves an ENS name to an address or an address to its primary name and avatar.
+- `GET /policy?address=` returns the MEV Shield policy stored in that address's ENS text records.
+- `GET /pool-threat?pool=` and `POST /pool-threat` scan a Uniswap V2 pool's recent swaps for sandwiches. Needs `GRAPH_API_KEY`. Without it the Worker answers 503 with a clear message.
+- `GET /health` (Worker only) reports whether `RPC_URL` and `GRAPH_API_KEY` are set, without calling the RPC.
+
+## Configuration
+
+Agent, in `agent/.env`
+
+- `RPC_URL` is required. An Ethereum mainnet RPC endpoint. The historical pool scan reads reserves at past blocks, which needs an archive capable endpoint.
+- `GRAPH_API_KEY` is optional for `/swap` and required for `/pool-threat`. Without it the swap analysis still runs on current pool state.
+- `ARBITRUM_RPC_URL` and `BASE_RPC_URL` are optional. They add L2 gas pricing and LI.FI bridge quotes to the route check.
+- `PORT` is optional and defaults to 3001.
+
+Worker only, set in the Cloudflare dashboard (`RPC_URL` and `GRAPH_API_KEY` as secrets)
+
+- `ALLOWED_ORIGIN` is a comma separated list of origins allowed by CORS, default `*`. Browsers on other origins get a 403.
+- `RATE_LIMIT_PER_MINUTE` is the per IP token bucket, default 30. `/swap` and `/pool-threat` cost 5 tokens, other routes 1, and `0` turns it off. The bucket lives in memory, so each Worker isolate keeps its own count.
+- `DEBUG_LOGS` set to `1` keeps the step by step analysis logs, which are off by default to save CPU.
+
+Dashboard, in `frontend/.env.local`
+
+- `VITE_API_URL` is the agent URL, default `http://localhost:3001`. It is read at build time.
+- `VITE_WALLETCONNECT_PROJECT_ID` is a WalletConnect project ID from Reown, used only to connect a wallet. The analysis works without a wallet.
+- The older names `VITE_API_BASE` and `VITE_REOWN_PROJECT_ID` still work.
+- `VITE_MAINNET_RPC_URL` is optional. It is the RPC for the dashboard's wagmi client and defaults to a public endpoint.
+
+ENS policy keys, written from the dashboard with `PublicResolver.setText` on the current mainnet resolver
+
+- `com.mevshield.riskProfile` is conservative, balanced or aggressive
+- `com.mevshield.privateThreshold` is a USD amount
+- `com.mevshield.splitEnabled` is true or false
+- `com.mevshield.maxChunks` is 1 to 50
+- `com.mevshield.preferredChains` is a comma separated list such as ethereum,arbitrum
+- `com.mevshield.slippageTolerance` is in basis points
+
+## Project structure
+
+```
+agent/
+  index.ts                      entry point, loads .env and starts the API
+  worker.ts                     Cloudflare Worker entry with the same routes, CORS and rate limit
+  wrangler.toml                 Worker config for the API (mev-shield-api)
+  api/
+    server.ts                   Express routes for /swap, /resolve, /policy
+    poolThreatRoute.ts          /pool-threat with a 5 minute cache
+  core/
+    agent.ts                    orchestrates policy, simulation, decision, plan
+    config.ts                   viem clients for mainnet and optional L2s
+    types.ts                    SwapIntent, UserPolicy, RiskLevel
+  perception/
+    simulator.ts                integer sandwich simulation on live reserves
+    poolHistory.ts              recent swap slippage scan used inside /swap
+    poolThreatAnalyzer.ts       standalone sandwich detector behind /pool-threat
+    ens.ts                      ENS resolution and policy parsing with a cache
+    mevTemperature.ts           pool MEV score, not called by the current pipeline
+  reasoning/
+    decisionEngine.ts           fast exits, then calls the route search
+    calcOptimizer.ts            relay cost model and the route search
+    chunkOptimizer.ts           earlier optimizer, not wired in
+    dynamicOptimizer.ts         earlier optimizer, not wired in
+    Optimizer.ts                earlier optimizer, not wired in
+  actions/
+    executor.ts                 turns a strategy into a plan
+    splitter.ts                 per chunk calldata and exact chunk replay
+    privateTx.ts                unsigned private relay transaction
+    lifiRouter.ts               LI.FI quotes and cross chain token map
+frontend/
+  wrangler.toml                 Worker config that serves dist as static assets (mev-shield)
+  src/config.js                 build time settings from VITE_* variables
+  src/App.jsx                   swap form and results dashboard
+  src/components/SetEnsPolicy.jsx   writes com.mevshield.* records on chain
+  src/components/Web3Provider.jsx   RainbowKit and wagmi setup
+  src/hooks/                    ENS helper hooks, currently unused
 ```
 
-### Environment Variables
+## Limitations
 
-```env
-# Backend
-ETHEREUM_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
-PORT=3001
+- **A planner, not an executor.** It never signs or submits anything. The private relay leg is priced by a model and the returned transaction names the Flashbots Protect RPC, but nothing is sent to it.
+- **Worst case attack model.** The bot's front run is sized without the victim's slippage limit, so the unprotected loss is what a trade with no effective `amountOutMin` would suffer. Real bots are capped by that limit.
+- **WETH in, dollar stablecoin out.** Input values are priced at the ETH price and the trade size is the raw output amount, so dollar figures are only right for WETH to a USD stablecoin. Other pairs run but their dollar figures are off.
+- **Uniswap V2, one pool, mainnet.** Chunks are split within a single V2 pair. There is no V3 or multi venue routing, and the L2 check only flags a possible saving without changing the plan.
+- **Hand set constants.** The route search prices gas at 30 times the live gas price, assumes searchers capture 60% of the arbitrage and bid 70% of that, damps the builder tip by 0.1 and charges price drift of 0.002% of the trade times the square root of the leg count. None of these are fitted to historical data.
+- **Only one ENS limit is enforced.** The route search honors `maxChunks`. The other fields are shown but do not change the result yet. Without the cap, a run of the same swap a few minutes earlier picked 20% private plus 43 public chunks for $671.
+- **No automated tests yet,** and the three earlier optimizer files are dead code.
+- **Light protection for public hosting.** The Worker entry checks input, limits CORS to `ALLOWED_ORIGIN` and rate limits per IP, but that limit is counted per isolate, not globally. The Express server still has open CORS and no rate limit. Every `/swap` call spends RPC quota.
 
-# Frontend
-VITE_REOWN_PROJECT_ID=your_reown_project_id
-VITE_API_BASE=http://localhost:3001
-```
+## Roadmap
 
----
-
-## Tech Stack
-
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| Optimizer | TypeScript | Sandwich simulation, cost function, Newton-Raphson, strategy comparison |
-| ENS | viem/ens, wagmi v2 | Text record reads/writes, bidirectional resolution |
-| API | Express.js | REST endpoints for swap analysis, ENS resolution, pool threat |
-| Frontend | React, RainbowKit | Swap interface, ENS identity badge, policy editor |
-| Data | Uniswap V2 Subgraph | Historical swap data for sandwich detection |
-| Wallet | wagmi v2, RainbowKit | Wallet connection, on-chain ENS writes |
-
----
-
-## How MEV Shield Is Different
-
-| Feature | Flashbots Protect | CoW Protocol | MEV Blocker | **MEV Shield** |
-|---------|------------------|-------------|-------------|----------------|
-| Private relay | ✅ | — | ✅ | ✅ |
-| Order splitting | — | Batch auction | — | **Calculus-optimized chunking** |
-| Optimal strategy selection | — | — | — | **3-way cost comparison per trade** |
-| User-configurable policy | — | — | — | **ENS text records** |
-| Pre-trade MEV simulation | — | — | — | **Full sandwich simulation** |
-| Analytical chunk optimization | — | — | — | **n* = √(M/G) + Newton-Raphson** |
-
----
-
-## Scope & Transparency
-
-This project demonstrates the **optimization mathematics and ENS policy architecture** for MEV protection. The demo runs simulations against live Ethereum mainnet data — real gas prices, real pool liquidity, real sandwich modeling.
-
-There are no deployed smart contracts or transaction builders. Demonstrating actual MEV protection requires high volumes of capital moving on-chain. The metrics generated are near-accurate representations of what execution costs would be, derived from real chain state.
-
-The innovation is the math, the adaptive strategy selection, and the use of ENS as a decentralized settings layer — not a transaction execution engine.
-
----
-
-## Prize Tracks
-
-- **🎉 Integrate ENS** ($3,500 pool) — Custom wagmi hooks, ENS text records as policy storage, functional on-chain reads/writes
-- **🥇 Most Creative Use of ENS for DeFi** ($1,500) — ENS as a portable, decentralized configuration layer for MEV protection preferences
-
----
+- Enforce the remaining ENS policy fields in the route search
+- Cap the bot model by the victim's slippage limit
+- Price any input and output token, not only WETH to stablecoins
+- Unit tests for the AMM math and the route search against fixed reserves
+- Uniswap V3 pools and routing across more than one pool
+- Submit private legs through Flashbots Protect or MEV Blocker behind an explicit signing step
+- A global rate limit for the hosted API, for example the Cloudflare rate limiting binding
+- Remove the unused optimizer versions
 
 ## License
 
-MIT
+Released under the [MIT License](LICENSE).
 
----
+## Author
 
-Built with frustration about losing money to sandwich bots, and calculus.
+Built by Aditya Joshi. [GitHub](https://github.com/CodeMongerrr) and [joshionchain.com](https://www.joshionchain.com)
