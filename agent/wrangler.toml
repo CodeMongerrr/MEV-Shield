@@ -1,0 +1,22 @@
+# Cloudflare Worker for the MEV Shield API. Entry is worker.ts, the Node server (index.ts) is untouched.
+name = "mev-shield-api"
+main = "worker.ts"
+compatibility_date = "2026-09-01"
+# node:https (pool threat scan) and process.env (core/config.ts) need Node.js compatibility.
+compatibility_flags = ["nodejs_compat"]
+
+# Keep variables set in the dashboard (for example ALLOWED_ORIGIN) when Workers Builds redeploys.
+keep_vars = true
+
+# Secrets, set in the dashboard or with `wrangler secret put`, never in this file
+#   RPC_URL          required, Ethereum mainnet JSON-RPC endpoint
+#   GRAPH_API_KEY    optional, enables /pool-threat
+# Optional variables (defaults live in worker.ts)
+#   ALLOWED_ORIGIN         comma separated origins allowed by CORS, default "*"
+#   RATE_LIMIT_PER_MINUTE  per IP token bucket size, default 30 (/swap costs 5), "0" disables
+#   DEBUG_LOGS             "1" keeps the verbose analysis logs (costs CPU on every /swap)
+#   ARBITRUM_RPC_URL, BASE_RPC_URL
+# Local development reads the same names from .dev.vars or .env (see .env.example).
+
+[observability]
+enabled = true
