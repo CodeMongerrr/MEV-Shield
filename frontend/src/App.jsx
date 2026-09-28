@@ -4,8 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { useEnsResolver } from "./hooks/useEnsResolver";
 import SetEnsPolicy from "./components/SetEnsPolicy";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-// ── API Config ──────────────────────────────────────────────────────────────
-const API_BASE = "http://localhost:3001";
+import { API_BASE } from "./config";
 
 // ── Common tokens ───────────────────────────────────────────────────────────
 const TOKENS = {
@@ -16,6 +15,8 @@ const TOKENS = {
   WBTC: { address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", symbol: "WBTC", decimals: 8 },
 };
 const TOKEN_LIST = Object.values(TOKENS);
+// Prefilled example, also run by the button on the landing view
+const EXAMPLE = { tokenIn: TOKENS.WETH.address, tokenOut: TOKENS.USDT.address, amount: "250" };
 function findToken(addr) {
   return TOKEN_LIST.find((t) => t.address.toLowerCase() === addr?.toLowerCase());
 }
@@ -104,7 +105,7 @@ function KV({ label, value, accent, mono, sub }) {
 }
 
 function Grid({ cols = 4, gap = 16, children }) {
-  return <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, 1fr)`, gap }}>{children}</div>;
+  return <div className="ms-grid" style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, 1fr)`, gap }}>{children}</div>;
 }
 
 function MiniTable({ headers, rows, highlightLast }) {
@@ -144,7 +145,7 @@ export default function App() {
   // Form
   const [tokenIn, setTokenIn] = useState(TOKENS.WETH.address);
   const [tokenOut, setTokenOut] = useState(TOKENS.USDT.address);
-  const [amountRaw, setAmountRaw] = useState("30");
+  const [amountRaw, setAmountRaw] = useState(EXAMPLE.amount);
   const [chainId, setChainId] = useState(1);
 
   // State
@@ -196,36 +197,47 @@ export default function App() {
   }, [userInput]);
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [logs]);
 
-  function getAmountIn() {
-    const tkn = findToken(tokenIn);
+  function getAmountIn(raw = amountRaw, token = tokenIn) {
+    const tkn = findToken(token);
     const dec = tkn?.decimals ?? 18;
     try {
-      const parts = amountRaw.split(".");
+      const parts = raw.split(".");
       const whole = parts[0] || "0";
       const frac = (parts[1] || "").padEnd(dec, "0").slice(0, dec);
       return BigInt(whole) * BigInt(10 ** dec) + BigInt(frac);
     } catch { return BigInt(0); }
   }
 
-  async function handleSubmit(e) {
+  function handleSubmit(e) {
     e.preventDefault();
+    runAnalysis({ user: resolvedUser || userInput, tokenIn, tokenOut, amountIn: getAmountIn().toString(), chainId });
+  }
+
+  // Landing view button. Works without a wallet or a resolved name, the API then uses default policy.
+  function runExample() {
+    setTokenIn(EXAMPLE.tokenIn); setTokenOut(EXAMPLE.tokenOut); setAmountRaw(EXAMPLE.amount); setChainId(1);
+    runAnalysis({ user: resolvedUser || "", tokenIn: EXAMPLE.tokenIn, tokenOut: EXAMPLE.tokenOut, amountIn: getAmountIn(EXAMPLE.amount, EXAMPLE.tokenIn).toString(), chainId: 1 });
+  }
+
+  async function runAnalysis({ user, tokenIn, tokenOut, amountIn, chainId }) {
     setLoading(true); setError(null); setResult(null); setLogs([]); setPoolThreat(null);
     const t0 = Date.now();
-    const amount = getAmountIn();
-    const effectiveUser = resolvedUser || userInput ;
 
-    const payload = {
-      user: effectiveUser,
-      tokenIn,
-      tokenOut,
-      amountIn: amount.toString(),
-      chainId,
-      ensName,
-    };
+    const payload = { user, tokenIn, tokenOut, amountIn, chainId, ensName };
     setLogs((l) => [...l, `POST /swap`, JSON.stringify(payload, null, 2)]);
     try {
-      const res = await fetch(`${API_BASE}/swap`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-      if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+      let res;
+      try {
+        res = await fetch(`${API_BASE}/swap`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      } catch {
+        throw new Error(`Could not reach the MEV Shield API at ${API_BASE}. Please try again in a moment.`);
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = text;
+        try { msg = JSON.parse(text).error || text; } catch { /* not JSON */ }
+        throw new Error(`${res.status} ${msg}`);
+      }
       const data = await res.json();
       setResult(data);
       setElapsed(((Date.now() - t0) / 1000).toFixed(1));
@@ -262,7 +274,7 @@ export default function App() {
       : comp?.winner === "DIRECT_SWAP" ? "Direct Swap" : exec?.strategyType || "—";
 
   return (
-    <div style={{ height: "100vh", background: C.bg, color: C.text, display: "flex", flexDirection: "column", fontFamily: "'JetBrains Mono', 'SF Mono', monospace", fontSize: 12 }}>
+    <div className="ms-shell" style={{ height: "100vh", background: C.bg, color: C.text, display: "flex", flexDirection: "column", fontFamily: "'JetBrains Mono', 'SF Mono', monospace", fontSize: 12 }}>
       <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
 
       {/* ── Header ──────────────────────── */}
@@ -278,9 +290,9 @@ export default function App() {
         </div>
       </header>
 
-      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+      <div className="ms-body" style={{ display: "flex", flex: 1, minHeight: 0 }}>
         {/* ── Left Panel: Swap Form ──────── */}
-        <aside style={{ width: 300, borderRight: `1px solid ${C.border}`, padding: 16, flexShrink: 0, display: "flex", flexDirection: "column" }}>
+        <aside className="ms-aside" style={{ width: 300, borderRight: `1px solid ${C.border}`, padding: 16, flexShrink: 0, display: "flex", flexDirection: "column" }}>
           {/* Wallet Connection (for ENS policy writing) */}
 <div style={{ marginBottom: 12 }}>
   <div style={{ fontSize: 9, color: C.textDim, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>
@@ -370,12 +382,24 @@ export default function App() {
         </aside>
 
         {/* ── Main Panel: Dashboard ──────── */}
-        <main style={{ flex: 1, padding: 20, overflow: "auto", minWidth: 0, minHeight: 0 }}>
+        <main className="ms-main" style={{ flex: 1, padding: 20, overflow: "auto", minWidth: 0, minHeight: 0 }}>
           {!result && !loading && (
             <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: C.textDim }}>
-              <div style={{ textAlign: "center" }}>
+              <div style={{ textAlign: "center", maxWidth: 540, padding: "24px 8px" }}>
                 <div style={{ fontSize: 36, marginBottom: 10 }}>🛡️</div>
-                <div style={{ fontSize: 13 }}>Configure swap and click Analyze</div>
+                <h1 style={{ fontSize: 17, fontWeight: 700, color: C.text, margin: "0 0 10px", letterSpacing: "-0.01em" }}>See what a sandwich bot would take from a large swap</h1>
+                <p style={{ fontSize: 12, lineHeight: 1.7, color: C.textMuted, margin: "0 0 18px" }}>
+                  MEV Shield replays a sandwich attack on the live Uniswap V2 pool for your trade, then compares a public swap, a Flashbots private relay and split routes to find the cheapest way to execute it. No wallet needed, it only reads mainnet data and never sends a transaction.
+                </p>
+                <button
+                  type="button"
+                  onClick={runExample}
+                  style={{ padding: "11px 22px", background: C.accent, color: C.bg, border: "none", borderRadius: 4, fontFamily: "inherit", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+                >
+                  Analyze 250 WETH to USDT
+                </button>
+                <div style={{ fontSize: 10, color: C.textDim, marginTop: 10 }}>Takes a few seconds on live data. Or set your own trade in the panel.</div>
+                {error && <div style={{ marginTop: 14, padding: 8, background: C.dangerDim, border: `1px solid ${C.danger}33`, borderRadius: 4, fontSize: 11, color: C.danger, wordBreak: "break-word" }}>{error}</div>}
               </div>
             </div>
           )}
@@ -404,7 +428,7 @@ export default function App() {
                   <div style={{ fontSize: 18, fontWeight: 700, color: C.accent }}>{winnerLabel}</div>
                   {comp?.recommendation && <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4, maxWidth: 600, lineHeight: 1.5 }}>{comp.recommendation}</div>}
                 </div>
-                <div style={{ display: "flex", gap: 20, alignItems: "flex-end" }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 20, alignItems: "flex-end" }}>
                   <KV label="Trade Size" value={fmt(result.tradeSizeUsd)} />
                   <KV label="MEV Exposure" value={fmt(sim?.estimatedLossUsd)} accent={sim?.estimatedLossUsd > 100 ? C.danger : C.accent} />
                   {costs && <KV label="Savings" value={`${pct(costs.savingsPercent, 1)}`} accent={C.accent} sub={`${fmt(costs.savings)}`} />}
