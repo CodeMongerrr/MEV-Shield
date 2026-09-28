@@ -8,3 +8,12 @@ html, body, #root {
 body {
   display: block;
 }
+
+/* Narrow screens: stack the explanation and results above the swap form */
+@media (max-width: 760px) {
+  .ms-shell { height: auto !important; min-height: 100vh; }
+  .ms-body { flex-direction: column; }
+  .ms-aside { width: auto !important; border-right: none !important; border-top: 1px solid #1a1a28; }
+  .ms-main { order: -1; overflow: visible !important; }
+  .ms-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+}
