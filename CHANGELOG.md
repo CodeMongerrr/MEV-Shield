@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased](https://github.com/CodeMongerrr/MEV-Shield/compare/v1.0.0...HEAD)
 
+### Added
+
+- Live demo on Cloudflare Workers at [mev-shield.joshionchain.workers.dev](https://mev-shield.joshionchain.workers.dev), linked from the README
+
+### Changed
+
+- The chunk table marks the chunk that goes through the private relay, and the footer totals MEV over the public chunks only
+- The pool history card says when no swap history was scanned instead of showing a LOW rating with zero swaps
+- The dashboard header shows the release version and links to this repository
+- The ENS policy panel no longer shows a developer hint about AppKit
+
 ## [1.0.0](https://github.com/CodeMongerrr/MEV-Shield/releases/tag/v1.0.0) - 2026-09-29
 
 First tagged release. It packages the ETHGlobal HackMoney 2026 build from 2 to 8 February 2026, with the fixes needed to install, typecheck and build from a clean clone, and a Cloudflare Workers port so it can be hosted.
