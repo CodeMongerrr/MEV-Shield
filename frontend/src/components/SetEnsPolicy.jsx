@@ -115,7 +115,7 @@ export default function SetEnsPolicy({ ensName, onPolicySet }) {
         Connect your wallet to set ENS policy records.
         <br />
         <span style={{ fontSize: 9, marginTop: 4, display: "block" }}>
-          Use the <code>&lt;appkit-button&gt;</code> or <code>useAppKit().open()</code>
+          Use Connect Wallet at the top of the panel. The analysis works without a wallet.
         </span>
       </div>
     )
