@@ -264,6 +264,11 @@ export default function App() {
   const costs = exec?.costs;
   const chunks = exec?.split?.chunks ?? [];
   const privateTx = exec?.privateTx;
+  // FULL_SHIELD sends the largest unsafe chunk through the private relay (agent/actions/executor.ts)
+  const unsafeChunks = chunks.filter((c) => !c.safeTx);
+  const privateChunkIndex = exec?.strategyType === "FULL_SHIELD" && privateTx && unsafeChunks.length > 0
+    ? unsafeChunks.reduce((a, b) => (BigInt(a.amountIn) > BigInt(b.amountIn) ? a : b)).index
+    : -1;
   const tokenInInfo = findToken(tokenIn);
   const tokenOutInfo = findToken(tokenOut);
 
@@ -282,11 +287,12 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 16 }}>🛡️</span>
           <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: "-0.02em" }}>MEV Shield</span>
-          <span style={{ fontSize: 10, color: C.textDim, marginLeft: 2 }}>v4 · Hybrid Optimizer</span>
+          <span style={{ fontSize: 10, color: C.textDim, marginLeft: 2 }}>v1.0.0</span>
         </div>
         <div style={{ display: "flex", gap: 12, fontSize: 10, color: C.textDim }}>
           {elapsed && <span>⏱ {elapsed}s</span>}
           {sim?.ethPriceUsd && <span>Ξ {fmt(sim.ethPriceUsd)}</span>}
+          <a href="https://github.com/CodeMongerrr/MEV-Shield" target="_blank" rel="noreferrer" style={{ color: C.textMuted, textDecoration: "none" }}>GitHub ↗</a>
         </div>
       </header>
 
@@ -525,11 +531,11 @@ export default function App() {
               <SectionCard title="Pool Threat History" icon="🔍" badge={
                 poolThreatLoading
                   ? <span style={{ fontSize: 10, color: C.textDim, fontWeight: 400, marginLeft: 6, animation: "pulse 1.5s ease-in-out infinite" }}>Loading…</span>
-                  : <Badge level={poolThreat?.threatLevel ?? sim?.poolThreat?.threatLevel ?? "LOW"} small />
+                  : (poolThreat || sim?.poolThreat)?.analyzedSwaps > 0 ? <Badge level={(poolThreat || sim?.poolThreat).threatLevel ?? "LOW"} small /> : null
               }>
                 {(() => {
                   const pt = poolThreat || sim?.poolThreat;
-                  if (!pt) return <div style={{ fontSize: 11, color: C.textDim }}>No pool threat data available</div>;
+                  if (!(pt?.analyzedSwaps > 0)) return <div style={{ fontSize: 11, color: C.textMuted }}>No swap history was scanned for this pool, so there is no sandwich history to show. The history scan needs a Graph API key on the API.</div>;
                   return (
                     <>
                       <Grid cols={5}>
@@ -636,7 +642,7 @@ export default function App() {
 
               {/* ══ 10. CHUNK BREAKDOWN TABLE ═════════════════════════════════ */}
               {chunks.length > 0 && (
-                <SectionCard title="Chunk Breakdown" icon="📦" badge={<span style={{ fontSize: 10, color: C.textMuted, fontWeight: 400, marginLeft: 6 }}>{chunks.length} chunks · {chunks.filter(c => c.safeTx).length} safe</span>}>
+                <SectionCard title="Chunk Breakdown" icon="📦" badge={<span style={{ fontSize: 10, color: C.textMuted, fontWeight: 400, marginLeft: 6 }}>{privateChunkIndex >= 0 ? `1 private + ${chunks.length - 1} public` : `${chunks.length} chunks`} · {chunks.filter(c => c.safeTx).length} safe</span>}>
                   <div style={{ overflowX: "auto" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
                       <thead>
@@ -655,10 +661,10 @@ export default function App() {
                               <td style={{ padding: "6px 8px" }}>{c.sizePercent?.toFixed(1)}%</td>
                               <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono'" }}>{fmt(amtUsd)}</td>
                               <td style={{ padding: "6px 8px", textAlign: "right" }}>{c.route?.chain ?? "ethereum"}</td>
-                              <td style={{ padding: "6px 8px", textAlign: "right", fontSize: 10 }}>{c.route?.type === "CROSS_CHAIN" ? "🌉 Cross" : "↔ Same"}</td>
-                              <td style={{ padding: "6px 8px", textAlign: "right", color: c.mevExposureUsd > 0 ? C.warn : C.textDim }}>{fmt(c.mevExposureUsd, 4)}</td>
+                              <td style={{ padding: "6px 8px", textAlign: "right", fontSize: 10 }}>{c.index === privateChunkIndex ? "🔒 Private" : c.route?.type === "CROSS_CHAIN" ? "🌉 Cross" : "↔ Same"}</td>
+                              <td style={{ padding: "6px 8px", textAlign: "right", color: c.mevExposureUsd > 0 && c.index !== privateChunkIndex ? C.warn : C.textDim }}>{fmt(c.index === privateChunkIndex ? 0 : c.mevExposureUsd, 4)}</td>
                               <td style={{ padding: "6px 8px", textAlign: "right" }}>{fmt(c.userGasCostUsd ?? 0, 4)}</td>
-                              <td style={{ padding: "6px 8px", textAlign: "right", color: c.safeTx ? C.accent : C.danger }}>{c.safeTx ? "✓ Safe" : "✗ Unsafe"}</td>
+                              <td style={{ padding: "6px 8px", textAlign: "right", color: c.safeTx || c.index === privateChunkIndex ? C.accent : C.danger }}>{c.index === privateChunkIndex ? "🔒 Relay" : c.safeTx ? "✓ Safe" : "✗ Unsafe"}</td>
                               <td style={{ padding: "6px 8px", textAlign: "right" }}>{c.blockDelay ?? 0}</td>
                             </tr>
                           );
@@ -668,7 +674,7 @@ export default function App() {
                   </div>
                   {exec?.split && (
                     <div style={{ marginTop: 8, display: "flex", gap: 16, fontSize: 10, color: C.textMuted }}>
-                      <span>Total MEV: <span style={{ color: C.warn }}>{fmt(exec.split.totalMevExposureUsd)}</span></span>
+                      <span>{privateChunkIndex >= 0 ? "Public chunk MEV" : "Total MEV"}: <span style={{ color: C.warn }}>{fmt(privateChunkIndex >= 0 ? chunks.reduce((s, c) => s + (c.index === privateChunkIndex ? 0 : c.mevExposureUsd || 0), 0) : exec.split.totalMevExposureUsd)}</span></span>
                       <span>All Safe: <span style={{ color: exec.split.allChunksSafe ? C.accent : C.danger }}>{exec.split.allChunksSafe ? "Yes" : "No"}</span></span>
                       <span>Execution Span: {exec.split.executionBlocks} blocks</span>
                     </div>
