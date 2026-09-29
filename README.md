@@ -2,6 +2,8 @@
 
 Simulates the sandwich bot before you swap, then finds the cheapest way to trade around it.
 
+[![Live demo](https://img.shields.io/badge/demo-live-6ee7b7?logo=cloudflare&logoColor=white)](https://mev-shield.joshionchain.workers.dev)
+[![CI](https://github.com/CodeMongerrr/MEV-Shield/actions/workflows/ci.yml/badge.svg)](https://github.com/CodeMongerrr/MEV-Shield/actions/workflows/ci.yml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](agent/tsconfig.json)
 [![viem](https://img.shields.io/badge/viem-2.45-1E1E20)](https://viem.sh)
 [![License MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -9,6 +11,12 @@ Simulates the sandwich bot before you swap, then finds the cheapest way to trade
 [![ETHGlobal HackMoney 2026](https://img.shields.io/badge/ETHGlobal-HackMoney%202026-5B4BFF)](https://ethglobal.com/events/hackmoney2026)
 
 MEV Shield is a TypeScript agent and a React dashboard, built solo during [ETHGlobal HackMoney 2026](https://ethglobal.com/events/hackmoney2026). Give it a swap and it reads the live Uniswap V2 pool, replays what a sandwich bot would do to that exact trade, and prices three ways to execute it. A single public swap, a Flashbots private relay, or a hybrid that sends part of the trade privately and the rest as public chunks too small to be worth attacking. It returns the cheapest plan with every cost broken out, plus a transaction outline for each leg.
+
+## Live demo
+
+Open [mev-shield.joshionchain.workers.dev](https://mev-shield.joshionchain.workers.dev) and press **Analyze 250 WETH to USDT**. It reads the live Uniswap V2 pool, gas and prices, replays the sandwich bot against that trade and returns the cheapest plan in about two seconds. No wallet is needed and nothing is signed or sent.
+
+Both parts run on Cloudflare Workers. The dashboard is a static site and the API is [mev-shield-api.joshionchain.workers.dev](https://mev-shield-api.joshionchain.workers.dev/health), a Worker that runs the same analysis code as the Node server. In browsers the API only answers the dashboard, and every visitor is rate limited. Numbers move with the chain, so each run differs a little from the sample result below.
 
 ## What it does
 
